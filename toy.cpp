@@ -274,8 +274,7 @@ static unique_ptr<ExprAST> parse_BinopRHS(int ExprPrec,
   }
 }
 
-// expr
-//    ::= primary binop_rhs
+// expr ::= primary binop_rhs
 static unique_ptr<ExprAST> parse_Expr() {
   auto lhs = parse_Primary();
   if (!lhs)
@@ -283,8 +282,7 @@ static unique_ptr<ExprAST> parse_Expr() {
   return parse_BinopRHS(0, std::move(lhs));
 }
 
-// prototype
-//      ::= id '(' id* ')'
+// prototype ::= id '(' id* ')'
 static unique_ptr<ProtoAST> parse_Proto() {
   if (CURR_TOK != tok_ident)
     return log_err_p("expected func name in prototype");
@@ -306,7 +304,7 @@ static unique_ptr<ProtoAST> parse_Proto() {
   return make_unique<ProtoAST>(fn_name, std::move(arg_names));
 }
 
-// definition ::= 'def' prototype expression
+// definition ::= 'def' proto expr
 static unique_ptr<FuncAST> parse_Def() {
   get_next_tok();
   auto proto = parse_Proto();
@@ -318,7 +316,7 @@ static unique_ptr<FuncAST> parse_Def() {
   return nullptr;
 }
 
-// toplevelexpr ::= expr
+// top_level_expr ::= expr
 static unique_ptr<FuncAST> parse_TopLevelExpr() {
   if (auto e = parse_Expr()) {
     auto proto = make_unique<ProtoAST>("__anon_expr", vector<string>());
@@ -327,7 +325,7 @@ static unique_ptr<FuncAST> parse_TopLevelExpr() {
   return nullptr;
 }
 
-// external ::= 'extern' prototype
+// extern ::= 'extern' proto
 static unique_ptr<ProtoAST> parse_Extern() {
   get_next_tok(); // eat extern
   return parse_Proto();
@@ -382,7 +380,7 @@ static void main_loop() {
 }
 
 // #####################################################################################
-// # main driver
+// # MAIN
 // #####################################################################################
 
 int main() {
@@ -397,4 +395,6 @@ int main() {
   get_next_tok();
 
   main_loop();
+  
+  printf("\n");
 }
