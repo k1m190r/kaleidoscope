@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-stdlib=libc++, -std=c++26, -Wall, -Wextra, -pedantic, -fexperimental-library]
