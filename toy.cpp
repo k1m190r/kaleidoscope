@@ -11,10 +11,10 @@ using std::string, std::vector;
 using std::unique_ptr, std::make_unique;
 
 // #####################################################################################
-// # Lexer
+// # LEXER
 // #####################################################################################
 
-// Lexer ∊ [0-255]
+// LEXER ∊ [0-255]
 enum Token {
   tok_eof = -1,
 
@@ -152,7 +152,7 @@ public:
 } // namespace
 
 // #####################################################################################
-// # Parser
+// # PARSER
 // #####################################################################################
 
 static int CURR_TOK;
@@ -162,7 +162,7 @@ static int get_next_tok() { return CURR_TOK = get_tok(); }
 static std::map<char, int> BINOP_PREC;
 
 // precedence of the pending binop
-static int get_tok_prec() {
+static int get_prec_of_tok() {
   if (isascii(CURR_TOK))
     return -1;
 
@@ -183,19 +183,19 @@ unique_ptr<ProtoAST> log_err_p(const char *msg) {
   return nullptr;
 }
 
-static unique_ptr<ExprAST> parse_Expr();
+static unique_ptr<ExprAST> parse_expr();
 
 // num ::= num
-static unique_ptr<ExprAST> parse_NumExpr() {
+static unique_ptr<ExprAST> parse_num_expr() {
   auto res = make_unique<NumExprAST>(NUM_VAL);
   get_next_tok();
   return std::move(res);
 }
 
 // paren_expr ::= '(' expr ')'
-static unique_ptr<ExprAST> parse_ParenExpr() {
+static unique_ptr<ExprAST> parse_paren_expr() {
   get_next_tok(); // eat (
-  auto v = parse_Expr();
+  auto v = parse_expr();
   if (!v)
     return nullptr;
   if (CURR_TOK != ')')
@@ -205,7 +205,7 @@ static unique_ptr<ExprAST> parse_ParenExpr() {
 }
 
 // ident_expr, ::= ident, ::= ident '(' expr* ')'
-static unique_ptr<ExprAST> parse_IdentExpr() {
+static unique_ptr<ExprAST> parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
@@ -216,7 +216,7 @@ static unique_ptr<ExprAST> parse_IdentExpr() {
   vector<unique_ptr<ExprAST>> args;
   if (CURR_TOK != ')') {
     while (true) {
-      if (auto arg = parse_Expr())
+      if (auto arg = parse_expr())
         args.push_back(std::move(arg));
       else
         return nullptr;
@@ -233,133 +233,139 @@ static unique_ptr<ExprAST> parse_IdentExpr() {
   return make_unique<CallExprAST>(ident_name, std::move(args));
 }
 
-// primary ::= ident_expr,  ::= num_expr, ::= paren_expr
-static unique_ptr<ExprAST> parse_Primary() {
+// primary ::= < ident_expr | num_expr | paren_expr >
+static unique_ptr<ExprAST> parse_prime() {
   switch (CURR_TOK) {
   default:
     return log_err("unknown token when expecting an expression");
   case tok_ident:
-    return parse_IdentExpr();
+    return parse_ident_expr();
   case tok_num:
-    return parse_NumExpr();
+    return parse_num_expr();
   case '(':
-    return parse_ParenExpr();
+    return parse_paren_expr();
   }
 }
 
+// after lhs is parsed [ + primary]
 // binop_rhs ::= ('+' primary)*
-static unique_ptr<ExprAST> parse_BinopRHS(int ExprPrec,
-                                          unique_ptr<ExprAST> lhs) {
+static unique_ptr<ExprAST> parse_binop_rhs(int expr_prec,
+                                           unique_ptr<ExprAST> lhs) {
   while (true) {
-    int tok_prec = get_tok_prec();
-    if (tok_prec < ExprPrec)
-      return lhs;
+    int tok_prec = get_prec_of_tok();
+
+    if (tok_prec < expr_prec)
+      return lhs; // keep lhs if hiher prec
 
     int binop = CURR_TOK;
-    get_next_tok();
+    get_next_tok(); // eat binop
 
-    auto rhs = parse_Primary();
+    auto rhs = parse_prime();
     if (!rhs)
       return nullptr;
 
-    int next_prec = get_tok_prec();
+    int next_prec = get_prec_of_tok();
     if (tok_prec < next_prec) {
-      rhs = parse_BinopRHS(tok_prec + 1, std::move(rhs));
+      rhs = parse_binop_rhs(tok_prec + 1, std::move(rhs));
       if (!rhs)
         return nullptr;
     }
 
     // merge lhs/rhs
     lhs = make_unique<BinExprAST>(binop, std::move(lhs), std::move(rhs));
-  }
+  } // while
 }
 
 // expr ::= primary binop_rhs
-static unique_ptr<ExprAST> parse_Expr() {
-  auto lhs = parse_Primary();
+static unique_ptr<ExprAST> parse_expr() {
+  auto lhs = parse_prime();
   if (!lhs)
     return nullptr;
-  return parse_BinopRHS(0, std::move(lhs));
+  return parse_binop_rhs(0, std::move(lhs));
 }
 
 // prototype ::= id '(' id* ')'
-static unique_ptr<ProtoAST> parse_Proto() {
+static unique_ptr<ProtoAST> parse_proto() {
   if (CURR_TOK != tok_ident)
     return log_err_p("expected func name in prototype");
 
   string fn_name = IDENT_STR;
-  get_next_tok();
+  get_next_tok(); // eat fn name, expect (
 
   if (CURR_TOK != '(')
     return log_err_p("Expected '(' in prototype");
 
   vector<string> arg_names;
   while (get_next_tok() == tok_ident)
-    arg_names.push_back(IDENT_STR);
+    arg_names.push_back(IDENT_STR); // collect func args
 
   if (CURR_TOK != ')')
     return log_err_p("Expected ')' in prototype");
 
-  get_next_tok(); // eat ')'
+  get_next_tok(); // eat )
   return make_unique<ProtoAST>(fn_name, std::move(arg_names));
 }
 
-// definition ::= 'def' proto expr
-static unique_ptr<FuncAST> parse_Def() {
-  get_next_tok();
-  auto proto = parse_Proto();
+// definition ::= 'def' proto
+static unique_ptr<FuncAST> parse_def() {
+  get_next_tok(); // eat def
+  auto proto = parse_proto();
   if (!proto)
     return nullptr;
 
-  if (auto e = parse_Expr())
-    return make_unique<FuncAST>(std::move(proto), std::move(e));
-  return nullptr;
-}
-
-// top_level_expr ::= expr
-static unique_ptr<FuncAST> parse_TopLevelExpr() {
-  if (auto e = parse_Expr()) {
-    auto proto = make_unique<ProtoAST>("__anon_expr", vector<string>());
-    return make_unique<FuncAST>(std::move(proto), std::move(e));
-  }
+  if (auto body = parse_expr())
+    return make_unique<FuncAST>(std::move(proto), std::move(body));
   return nullptr;
 }
 
 // extern ::= 'extern' proto
-static unique_ptr<ProtoAST> parse_Extern() {
+static unique_ptr<ProtoAST> parse_extern() {
   get_next_tok(); // eat extern
-  return parse_Proto();
+  return parse_proto();
+}
+
+// top_level_expr ::= expr
+static unique_ptr<FuncAST> parse_top_lev_expr() {
+  if (auto body = parse_expr()) {
+    auto proto = make_unique<ProtoAST>("__anon_expr", vector<string>());
+    return make_unique<FuncAST>(std::move(proto), std::move(body));
+  }
+  return nullptr;
 }
 
 // #####################################################################################
 // # Top Level Parsing
 // #####################################################################################
 
-void handle_Def() {
-  if (parse_Def())
+void handle_def() {
+  if (parse_def())
     fprintf(stderr, "Parsed a func def.\n");
   else
     get_next_tok();
 }
 
-void handle_Extern() {
-  if (parse_Extern())
+void handle_extern() {
+  if (parse_extern())
     fprintf(stderr, "Parsed an extern\n");
   else
     get_next_tok();
 }
 
-void handle_TopLevelExpr() {
-  if (parse_TopLevelExpr())
+void handle_top_lev_expr() {
+  if (parse_top_lev_expr())
     fprintf(stderr, "Parsed a top-leve expr\n");
   else
     get_next_tok();
 }
 
 // top ::= def | extern | expr | ';'
-static void main_loop() {
+static void token_loop() {
+
+  get_next_tok(); // first token
+
   while (true) {
     fprintf(stderr, "ready> ");
+
     switch (CURR_TOK) {
     case tok_eof:
       return;
@@ -367,16 +373,16 @@ static void main_loop() {
       get_next_tok();
       break;
     case tok_def:
-      handle_Def();
+      handle_def();
       break;
     case tok_extern:
-      handle_Extern();
+      handle_extern();
       break;
     default:
-      handle_TopLevelExpr();
+      handle_top_lev_expr();
       break;
-    }
-  }
+    } // sw
+  } // wh
 }
 
 // #####################################################################################
@@ -392,9 +398,8 @@ int main() {
 
   // prime
   fprintf(stderr, "ready> ");
-  get_next_tok();
 
-  main_loop();
-  
+  token_loop();
+// 
   printf("\n");
 }
