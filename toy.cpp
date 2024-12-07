@@ -1,3 +1,6 @@
+// #####################################################################################
+// #include
+
 #include "llvm/ADT/APFloat.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -32,16 +35,16 @@ typedef llvm::BasicBlock BB;
 // #####################################################################################
 
 // LEXER ∊ [0-255]
-enum Token {
-  tok_eof = -1,
+enum TokenType {
+  TOK_EOF = -1,
 
   // commands
-  tok_def = -2,
-  tok_extern = -3,
+  TOK_DEF = -2,
+  TOK_EXTERN = -3,
 
   // primary
-  tok_ident = -4,
-  tok_num = -5,
+  TOK_IDENT = -4,
+  TOK_NUM = -5,
 };
 
 static string IDENT_STR; // ← tok_ident
@@ -65,10 +68,10 @@ static int get_tok() {
 
     // either kw ∊ {def extern} or identifier
     if (IDENT_STR == "def")
-      return tok_def;
+      return TOK_DEF;
     if (IDENT_STR == "extern")
-      return tok_extern;
-    return tok_ident;
+      return TOK_EXTERN;
+    return TOK_IDENT;
   }
 
   // number [0-9.]+
@@ -80,7 +83,7 @@ static int get_tok() {
     } while (isdigit(last_ch) || last_ch == '.');
 
     NUM_VAL = strtod(num_str.c_str(), nullptr);
-    return tok_num;
+    return TOK_NUM;
   }
 
   // comments till end of line
@@ -95,7 +98,7 @@ static int get_tok() {
 
   // keep EOF
   if (last_ch == EOF)
-    return tok_eof;
+    return TOK_EOF;
 
   // return last char
   int this_ch = last_ch;
@@ -118,65 +121,65 @@ public:
 
 // ###################
 class Num_Expr_AST : public Expr_AST {
-  double value;
+  double Value;
 
 public:
-  Num_Expr_AST(double value) : value(value) {}
+  Num_Expr_AST(double value) : Value(value) {}
   V *codegen() override;
 };
 
 // ###################
 class Var_Expr_AST : public Expr_AST {
-  string name;
+  string Name;
 
 public:
-  Var_Expr_AST(const string &name) : name(name) {}
+  Var_Expr_AST(const string &name) : Name(name) {}
   V *codegen() override;
 };
 
 // ###################
 class Bin_Expr_AST : public Expr_AST {
-  char op;
-  unique_ptr<Expr_AST> lhs, rhs;
+  char Op;
+  unique_ptr<Expr_AST> Lhs, Rhs;
 
 public:
   Bin_Expr_AST(char op, unique_ptr<Expr_AST> lhs, unique_ptr<Expr_AST> rhs)
-      : op(op), lhs(std::move(lhs)), rhs(std::move(rhs)) {}
+      : Op(op), Lhs(std::move(lhs)), Rhs(std::move(rhs)) {}
   V *codegen() override;
 };
 
 // ###################
 class Call_Expr_AST : public Expr_AST {
-  string callee;
-  vector<unique_ptr<Expr_AST>> args;
+  string Callee;
+  vector<unique_ptr<Expr_AST>> Args;
 
 public:
   Call_Expr_AST(const string &callee, vector<unique_ptr<Expr_AST>> args)
-      : callee(callee), args(std::move(args)) {}
+      : Callee(callee), Args(std::move(args)) {}
   V *codegen() override;
 };
 
 // ###################
 class Proto_AST {
-  string name;
-  vector<string> args;
+  string Name;
+  vector<string> Args;
 
 public:
   Proto_AST(const string &name, vector<string> args)
-      : name(name), args(std::move(args)) {}
+      : Name(name), Args(std::move(args)) {}
 
-  const string &getName() const { return name; }
+  const string &getName() const { return Name; }
   FN *codegen();
 };
 
 // ###################
 class Func_AST {
-  unique_ptr<Proto_AST> proto;
-  unique_ptr<Expr_AST> body;
+  unique_ptr<Proto_AST> Proto;
+  unique_ptr<Expr_AST> Body;
 
 public:
   Func_AST(unique_ptr<Proto_AST> proto, unique_ptr<Expr_AST> body)
-      : proto(std::move(proto)), body(std::move(body)) {}
+      : Proto(std::move(proto)), Body(std::move(body)) {}
   FN *codegen();
 };
 
@@ -186,18 +189,18 @@ public:
 // # PARSER
 // #####################################################################################
 
-static int CURR_TOK;
-static int get_next_tok() { return CURR_TOK = get_tok(); }
+static int CURR_TOK_KIND;
+static int get_next_tok() { return CURR_TOK_KIND = get_tok(); }
 
 // binop precedence
 static std::map<char, int> BINOP_PREC;
 
 // precedence of the pending binop
 static int get_prec_of_tok() {
-  if (!isascii(CURR_TOK))
+  if (!isascii(CURR_TOK_KIND))
     return -1;
 
-  int tok_prec = BINOP_PREC[CURR_TOK];
+  int tok_prec = BINOP_PREC[CURR_TOK_KIND];
   if (tok_prec <= 0)
     return -1;
   return tok_prec;
@@ -228,7 +231,7 @@ static unique_ptr<Expr_AST> parse_paren_expr() {
   auto v = parse_expr();
   if (!v)
     return nullptr;
-  if (CURR_TOK != ')')
+  if (CURR_TOK_KIND != ')')
     return LOG_err("expected ')'");
   get_next_tok(); // eat )
   return v;
@@ -239,22 +242,22 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
-  if (CURR_TOK != '(')
+  if (CURR_TOK_KIND != '(')
     return make_unique<Var_Expr_AST>(ident_name);
 
   get_next_tok(); // eat (
   vector<unique_ptr<Expr_AST>> args;
-  if (CURR_TOK != ')') {
+  if (CURR_TOK_KIND != ')') {
     while (true) {
       if (auto arg = parse_expr())
         args.push_back(std::move(arg));
       else
         return nullptr;
 
-      if (CURR_TOK == ')')
+      if (CURR_TOK_KIND == ')')
         break;
 
-      if (CURR_TOK != ',')
+      if (CURR_TOK_KIND != ',')
         return LOG_err("Expected ')' or ',' in arg list");
       get_next_tok();
     }
@@ -265,12 +268,12 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
 
 // primary ::= < ident_expr | num_expr | paren_expr >
 static unique_ptr<Expr_AST> parse_prime() {
-  switch (CURR_TOK) {
+  switch (CURR_TOK_KIND) {
   default:
     return LOG_err("unknown token when expecting an expression");
-  case tok_ident:
+  case TOK_IDENT:
     return parse_ident_expr();
-  case tok_num:
+  case TOK_NUM:
     return parse_num_expr();
   case '(':
     return parse_paren_expr();
@@ -285,9 +288,9 @@ static unique_ptr<Expr_AST> parse_binop_rhs(int expr_prec,
     int tok_prec = get_prec_of_tok();
 
     if (tok_prec < expr_prec)
-      return lhs; // keep lhs if hiher prec
+      return lhs; // keep lhs if higher prec
 
-    int binop = CURR_TOK;
+    int binop = CURR_TOK_KIND;
     get_next_tok(); // eat binop
 
     auto rhs = parse_prime();
@@ -316,20 +319,20 @@ static unique_ptr<Expr_AST> parse_expr() {
 
 // prototype ::= id '(' id* ')'
 static unique_ptr<Proto_AST> parse_proto() {
-  if (CURR_TOK != tok_ident)
+  if (CURR_TOK_KIND != TOK_IDENT)
     return LOG_err_p("expected func name in prototype");
 
   string fn_name = IDENT_STR;
   get_next_tok(); // eat fn name, expect (
 
-  if (CURR_TOK != '(')
+  if (CURR_TOK_KIND != '(')
     return LOG_err_p("Expected '(' in prototype");
 
   vector<string> arg_names;
-  while (get_next_tok() == tok_ident)
+  while (get_next_tok() == TOK_IDENT)
     arg_names.push_back(IDENT_STR); // collect func args
 
-  if (CURR_TOK != ')')
+  if (CURR_TOK_KIND != ')')
     return LOG_err_p("Expected ')' in prototype");
 
   get_next_tok(); // eat )
@@ -379,24 +382,24 @@ V *LOG_err_v(const char *msg) {
 }
 
 V *Num_Expr_AST::codegen() {
-  return llvm::ConstantFP::get(*CTX, llvm::APFloat(value));
+  return llvm::ConstantFP::get(*CTX, llvm::APFloat(Value));
 }
 
 V *Var_Expr_AST::codegen() {
-  V *v = NAMED_Vs[name];
+  V *v = NAMED_Vs[Name];
   if (!v)
     LOG_err_v("Unknown var name");
   return v;
 }
 
 V *Bin_Expr_AST::codegen() {
-  V *l = lhs->codegen();
-  V *r = rhs->codegen();
+  V *l = Lhs->codegen();
+  V *r = Rhs->codegen();
 
   if (!l || !r)
     return nullptr;
 
-  switch (op) {
+  switch (Op) {
   case '+':
     return IR_BLD->CreateFAdd(l, r, "add");
   case '-':
@@ -412,16 +415,16 @@ V *Bin_Expr_AST::codegen() {
 }
 
 V *Call_Expr_AST::codegen() {
-  FN *callee_fn = MODULE->getFunction(callee);
+  FN *callee_fn = MODULE->getFunction(Callee);
   if (!callee_fn)
     return LOG_err_v("Unknown func ref");
 
-  if (callee_fn->arg_size() != args.size())
+  if (callee_fn->arg_size() != Args.size())
     return LOG_err_v("Incorrect # arguments passed");
 
   vector<V *> args_v;
-  for (unsigned i = 0, e = args.size(); i != e; ++i) {
-    args_v.push_back(args[i]->codegen());
+  for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+    args_v.push_back(Args[i]->codegen());
     if (!args_v.back())
       return nullptr;
   }
@@ -429,22 +432,22 @@ V *Call_Expr_AST::codegen() {
 }
 
 FN *Proto_AST::codegen() {
-  vector<TP *> doubles(args.size(), TP::getDoubleTy(*CTX));
+  vector<TP *> doubles(Args.size(), TP::getDoubleTy(*CTX));
   FNT *ft = FNT::get(TP::getDoubleTy(*CTX), doubles, false);
-  FN *f = FN::Create(ft, FN::ExternalLinkage, name, MODULE.get());
+  FN *f = FN::Create(ft, FN::ExternalLinkage, Name, MODULE.get());
 
   unsigned idx = 0;
   for (auto &arg : f->args())
-    arg.setName(args[idx++]);
+    arg.setName(Args[idx++]);
 
   return f;
 }
 
 FN *Func_AST::codegen() {
-  FN *fn = MODULE->getFunction(proto->getName());
+  FN *fn = MODULE->getFunction(Proto->getName());
 
   if (!fn)
-    fn = proto->codegen();
+    fn = Proto->codegen();
 
   if (!fn)
     return nullptr;
@@ -459,7 +462,7 @@ FN *Func_AST::codegen() {
   for (auto &arg : fn->args())
     NAMED_Vs[string(arg.getName())] = &arg;
 
-  if (V *ret = body->codegen()) {
+  if (V *ret = Body->codegen()) {
     IR_BLD->CreateRet(ret);
     llvm::verifyFunction(*fn);
     return fn;
@@ -502,8 +505,8 @@ static void handle_extern() {
 }
 
 static void handle_top_lev_expr() {
-  if (auto fn_ast = parse_top_lev_expr()) {
-    if (auto *fn_ir = fn_ast->codegen()) {
+  if (auto top_as_fn_ast = parse_top_lev_expr()) {
+    if (auto *fn_ir = top_as_fn_ast->codegen()) {
       fprintf(stderr, "Read top-level expression:\n\n");
       fn_ir->print(llvm::errs());
       fprintf(stderr, "\n");
@@ -516,21 +519,21 @@ static void handle_top_lev_expr() {
 }
 
 // top ::= def | extern | expr | ';'
-static void token_loop() {
+static void LOOP() {
 
   while (true) {
     fprintf(stderr, "ready> ");
 
-    switch (CURR_TOK) {
-    case tok_eof:
+    switch (CURR_TOK_KIND) {
+    case TOK_EOF:
       return;
     case ';':
       get_next_tok();
       break;
-    case tok_def:
+    case TOK_DEF:
       handle_def();
       break;
-    case tok_extern:
+    case TOK_EXTERN:
       handle_extern();
       break;
     default:
@@ -555,8 +558,9 @@ int main() {
   get_next_tok(); // first token
 
   init_module();
-  token_loop();
+  LOOP();
 
+  printf("\n");
   MODULE->print(llvm::errs(), nullptr);
   printf("\n");
 }

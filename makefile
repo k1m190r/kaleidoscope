@@ -3,7 +3,7 @@ CFILE = toy
 CPP = clang++-20
 
 # -stdlib=libc++ : for std::print
-CFLAGS0 = -g3 -pthread # -stdlib=libc++ -fexperimental-library -std=c++26
+CFLAGS0 = -g3 -pthread -fexperimental-library -std=c++26 # -stdlib=libc++
 
 # optimizations use the SIMD/AVX
 CFLAGS1 = -O3 -march=native -mavx2 
