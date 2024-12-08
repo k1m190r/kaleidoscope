@@ -1,6 +1,7 @@
 // #####################################################################################
 // #include
 
+#include "./KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -9,8 +10,18 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/Reassociate.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
 #include <cctype>  // is...{space digit alpha alnum ascii}
 #include <cstdio>  // getchar fprintf EOF
@@ -21,21 +32,17 @@
 #include <utility> // move
 #include <vector>
 
+using namespace llvm;
+
 using std::string, std::vector;
 using std::unique_ptr, std::make_unique;
-
-typedef llvm::Type TP;
-typedef llvm::Value V;
-typedef llvm::Function FN;
-typedef llvm::FunctionType FNT;
-typedef llvm::BasicBlock BB;
 
 // #####################################################################################
 // # LEXER
 // #####################################################################################
 
 // LEXER ∊ [0-255]
-enum TokenType {
+enum Token {
   TOK_EOF = -1,
 
   // commands
@@ -116,16 +123,16 @@ namespace {
 class Expr_AST {
 public:
   virtual ~Expr_AST() = default;
-  virtual V *codegen() = 0;
+  virtual Value *codegen() = 0;
 };
 
 // ###################
 class Num_Expr_AST : public Expr_AST {
-  double Value;
+  double Val;
 
 public:
-  Num_Expr_AST(double value) : Value(value) {}
-  V *codegen() override;
+  Num_Expr_AST(double value) : Val(value) {}
+  Value *codegen() override;
 };
 
 // ###################
@@ -134,7 +141,7 @@ class Var_Expr_AST : public Expr_AST {
 
 public:
   Var_Expr_AST(const string &name) : Name(name) {}
-  V *codegen() override;
+  Value *codegen() override;
 };
 
 // ###################
@@ -145,7 +152,7 @@ class Bin_Expr_AST : public Expr_AST {
 public:
   Bin_Expr_AST(char op, unique_ptr<Expr_AST> lhs, unique_ptr<Expr_AST> rhs)
       : Op(op), Lhs(std::move(lhs)), Rhs(std::move(rhs)) {}
-  V *codegen() override;
+  Value *codegen() override;
 };
 
 // ###################
@@ -156,7 +163,7 @@ class Call_Expr_AST : public Expr_AST {
 public:
   Call_Expr_AST(const string &callee, vector<unique_ptr<Expr_AST>> args)
       : Callee(callee), Args(std::move(args)) {}
-  V *codegen() override;
+  Value *codegen() override;
 };
 
 // ###################
@@ -169,7 +176,7 @@ public:
       : Name(name), Args(std::move(args)) {}
 
   const string &getName() const { return Name; }
-  FN *codegen();
+  Function *codegen();
 };
 
 // ###################
@@ -180,7 +187,7 @@ class Func_AST {
 public:
   Func_AST(unique_ptr<Proto_AST> proto, unique_ptr<Expr_AST> body)
       : Proto(std::move(proto)), Body(std::move(body)) {}
-  FN *codegen();
+  Function *codegen();
 };
 
 } // namespace
@@ -206,13 +213,13 @@ static int get_prec_of_tok() {
   return tok_prec;
 }
 
-unique_ptr<Expr_AST> LOG_err(const char *msg) {
+unique_ptr<Expr_AST> LOG_ERR(const char *msg) {
   fprintf(stderr, "Error: %s\n", msg);
   return nullptr;
 }
 
-unique_ptr<Proto_AST> LOG_err_p(const char *msg) {
-  LOG_err(msg);
+unique_ptr<Proto_AST> LOG_ERR_P(const char *msg) {
+  LOG_ERR(msg);
   return nullptr;
 }
 
@@ -232,7 +239,7 @@ static unique_ptr<Expr_AST> parse_paren_expr() {
   if (!v)
     return nullptr;
   if (CURR_TOK_KIND != ')')
-    return LOG_err("expected ')'");
+    return LOG_ERR("expected ')'");
   get_next_tok(); // eat )
   return v;
 }
@@ -258,7 +265,7 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
         break;
 
       if (CURR_TOK_KIND != ',')
-        return LOG_err("Expected ')' or ',' in arg list");
+        return LOG_ERR("Expected ')' or ',' in arg list");
       get_next_tok();
     }
   }
@@ -270,7 +277,7 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
 static unique_ptr<Expr_AST> parse_prime() {
   switch (CURR_TOK_KIND) {
   default:
-    return LOG_err("unknown token when expecting an expression");
+    return LOG_ERR("unknown token when expecting an expression");
   case TOK_IDENT:
     return parse_ident_expr();
   case TOK_NUM:
@@ -320,20 +327,20 @@ static unique_ptr<Expr_AST> parse_expr() {
 // prototype ::= id '(' id* ')'
 static unique_ptr<Proto_AST> parse_proto() {
   if (CURR_TOK_KIND != TOK_IDENT)
-    return LOG_err_p("expected func name in prototype");
+    return LOG_ERR_P("expected func name in prototype");
 
   string fn_name = IDENT_STR;
   get_next_tok(); // eat fn name, expect (
 
   if (CURR_TOK_KIND != '(')
-    return LOG_err_p("Expected '(' in prototype");
+    return LOG_ERR_P("Expected '(' in prototype");
 
   vector<string> arg_names;
   while (get_next_tok() == TOK_IDENT)
     arg_names.push_back(IDENT_STR); // collect func args
 
   if (CURR_TOK_KIND != ')')
-    return LOG_err_p("Expected ')' in prototype");
+    return LOG_ERR_P("Expected ')' in prototype");
 
   get_next_tok(); // eat )
   return make_unique<Proto_AST>(fn_name, std::move(arg_names));
@@ -371,30 +378,53 @@ static unique_ptr<Proto_AST> parse_extern() {
 // #####################################################################################
 
 // LLVM vars
-static unique_ptr<llvm::LLVMContext> CTX;
-static unique_ptr<llvm::Module> MODULE;
-static unique_ptr<llvm::IRBuilder<>> IR_BLD;
-static std::map<string, V *> NAMED_Vs;
+static unique_ptr<LLVMContext> CTX;
+static unique_ptr<Module> MODULE;
+static unique_ptr<IRBuilder<>> IR_BLD;
+static std::map<string, Value *> NAMED_VALs;
 
-V *LOG_err_v(const char *msg) {
-  LOG_err(msg);
+// JIT
+static unique_ptr<orc::KaleidoscopeJIT> JIT;
+static unique_ptr<FunctionPassManager> FPM;
+
+static unique_ptr<LoopAnalysisManager> LAM;
+static unique_ptr<FunctionAnalysisManager> FAM;
+static unique_ptr<CGSCCAnalysisManager> CGAM;
+static unique_ptr<ModuleAnalysisManager> MAM;
+
+static unique_ptr<PassInstrumentationCallbacks> PIC;
+static unique_ptr<StandardInstrumentations> SI;
+static std::map<string, unique_ptr<Proto_AST>> FUNC_PROTOs;
+static ExitOnError EXIT_ON_ERR;
+
+Value *LogErrorV(const char *msg) {
+  LOG_ERR(msg);
   return nullptr;
 }
 
-V *Num_Expr_AST::codegen() {
-  return llvm::ConstantFP::get(*CTX, llvm::APFloat(Value));
+Function *getFunction(string name) {
+  if (auto *f = MODULE->getFunction(name))
+    return f;
+
+  auto fi = FUNC_PROTOs.find(name);
+  if (fi != FUNC_PROTOs.end())
+    return fi->second->codegen();
+
+  return nullptr;
 }
 
-V *Var_Expr_AST::codegen() {
-  V *v = NAMED_Vs[Name];
+Value *Num_Expr_AST::codegen() { return ConstantFP::get(*CTX, APFloat(Val)); }
+
+Value *Var_Expr_AST::codegen() {
+  Value *v = NAMED_VALs[Name];
   if (!v)
-    LOG_err_v("Unknown var name");
+    return LogErrorV("Unknown var name");
   return v;
 }
 
-V *Bin_Expr_AST::codegen() {
-  V *l = Lhs->codegen();
-  V *r = Rhs->codegen();
+Value *Bin_Expr_AST::codegen() {
+  Value *l = Lhs->codegen();
+  Value *r = Rhs->codegen();
 
   if (!l || !r)
     return nullptr;
@@ -408,21 +438,21 @@ V *Bin_Expr_AST::codegen() {
     return IR_BLD->CreateFMul(l, r, "mul");
   case '<':
     l = IR_BLD->CreateFCmpULT(l, r, "cmp");
-    return IR_BLD->CreateUIToFP(l, TP::getDoubleTy(*CTX), "bool");
+    return IR_BLD->CreateUIToFP(l, Type::getDoubleTy(*CTX), "bool");
   default:
-    return LOG_err_v("invalid binary oeprator");
+    return LogErrorV("invalid binary operator");
   } // sw
 }
 
-V *Call_Expr_AST::codegen() {
-  FN *callee_fn = MODULE->getFunction(Callee);
+Value *Call_Expr_AST::codegen() {
+  Function *callee_fn = getFunction(Callee);
   if (!callee_fn)
-    return LOG_err_v("Unknown func ref");
+    return LogErrorV("Unknown func ref");
 
   if (callee_fn->arg_size() != Args.size())
-    return LOG_err_v("Incorrect # arguments passed");
+    return LogErrorV("Incorrect # arguments passed");
 
-  vector<V *> args_v;
+  vector<Value *> args_v;
   for (unsigned i = 0, e = Args.size(); i != e; ++i) {
     args_v.push_back(Args[i]->codegen());
     if (!args_v.back())
@@ -431,10 +461,11 @@ V *Call_Expr_AST::codegen() {
   return IR_BLD->CreateCall(callee_fn, args_v, "call");
 }
 
-FN *Proto_AST::codegen() {
-  vector<TP *> doubles(Args.size(), TP::getDoubleTy(*CTX));
-  FNT *ft = FNT::get(TP::getDoubleTy(*CTX), doubles, false);
-  FN *f = FN::Create(ft, FN::ExternalLinkage, Name, MODULE.get());
+Function *Proto_AST::codegen() {
+  vector<Type *> doubles(Args.size(), Type::getDoubleTy(*CTX));
+  FunctionType *ft = FunctionType::get(Type::getDoubleTy(*CTX), doubles, false);
+  Function *f =
+      Function::Create(ft, Function::ExternalLinkage, Name, MODULE.get());
 
   unsigned idx = 0;
   for (auto &arg : f->args())
@@ -443,28 +474,27 @@ FN *Proto_AST::codegen() {
   return f;
 }
 
-FN *Func_AST::codegen() {
-  FN *fn = MODULE->getFunction(Proto->getName());
+Function *Func_AST::codegen() {
 
-  if (!fn)
-    fn = Proto->codegen();
-
+  auto &p = *Proto;
+  FUNC_PROTOs[Proto->getName()] = std::move(Proto);
+  Function *fn = getFunction(p.getName());
   if (!fn)
     return nullptr;
 
-  // if (!fn->empty())
-  //   return (FN *)LOG_err_v("Func cannot be re-defined");
-
-  BB *bb = BB::Create(*CTX, "entry", fn);
+  BasicBlock *bb = BasicBlock::Create(*CTX, "entry", fn);
   IR_BLD->SetInsertPoint(bb);
 
-  NAMED_Vs.clear();
+  NAMED_VALs.clear();
   for (auto &arg : fn->args())
-    NAMED_Vs[string(arg.getName())] = &arg;
+    NAMED_VALs[string(arg.getName())] = &arg;
 
-  if (V *ret = Body->codegen()) {
+  if (Value *ret = Body->codegen()) {
     IR_BLD->CreateRet(ret);
-    llvm::verifyFunction(*fn);
+
+    verifyFunction(*fn);
+
+    FPM->run(*fn, *FAM);
     return fn;
   }
 
@@ -476,11 +506,44 @@ FN *Func_AST::codegen() {
 // # Top Level Parsing
 // #####################################################################################
 
-static void init_module() {
-  CTX = make_unique<llvm::LLVMContext>();
-  MODULE = make_unique<llvm::Module>("kaleidoscope jit", *CTX);
-  IR_BLD = make_unique<llvm::IRBuilder<>>(*CTX);
-}
+static void init_module_and_mgrs() {
+
+  // init CTX and Module
+  CTX = make_unique<LLVMContext>();
+  MODULE = make_unique<Module>("kaleidoscope jit", *CTX);
+  MODULE->setDataLayout(JIT->getDataLayout());
+
+  IR_BLD = make_unique<IRBuilder<>>(*CTX);
+
+  // pass manager
+
+  // new pass and analysis managers
+  FPM = make_unique<FunctionPassManager>();
+  LAM = make_unique<LoopAnalysisManager>();
+  FAM = make_unique<FunctionAnalysisManager>();
+  CGAM = make_unique<CGSCCAnalysisManager>();
+  MAM = make_unique<ModuleAnalysisManager>();
+
+  PIC = make_unique<PassInstrumentationCallbacks>();
+  SI = make_unique<StandardInstrumentations>(*CTX, true); // debug logging t/f
+  SI->registerCallbacks(*PIC, MAM.get());
+
+  // transform passes
+  // peephole opt and bit twiddling
+  FPM->addPass(InstCombinePass());
+  // reassociate expr
+  FPM->addPass(ReassociatePass());
+  // eliminate common sub-expressions
+  FPM->addPass(GVNPass());
+  // simplify CFG (delete unreachable blcoks etc.)
+  FPM->addPass(SimplifyCFGPass());
+
+  // add passes
+  PassBuilder pb;
+  pb.registerModuleAnalyses(*MAM);
+  pb.registerFunctionAnalyses(*FAM);
+  pb.crossRegisterProxies(*LAM, *FAM, *CGAM, *MAM);
+};
 
 static void handle_def() {
   if (auto fn_ast = parse_def()) {
@@ -488,31 +551,44 @@ static void handle_def() {
       fprintf(stderr, "Read function definition:\n\n");
       fn_ir->print(llvm::errs());
       fprintf(stderr, "\n");
+
+      EXIT_ON_ERR(JIT->addModule(
+          orc::ThreadSafeModule(std::move(MODULE), std::move(CTX))));
+      init_module_and_mgrs();
     }
   } else
     get_next_tok();
 }
 
 static void handle_extern() {
-  if (auto ProtoAST = parse_extern()) {
-    if (auto *FnIR = ProtoAST->codegen()) {
+  if (auto proto = parse_extern()) {
+    if (auto *fn_ir = proto->codegen()) {
       fprintf(stderr, "Read extern:\n\n");
-      FnIR->print(llvm::errs());
+      fn_ir->print(llvm::errs());
       fprintf(stderr, "\n");
+
+      FUNC_PROTOs[proto->getName()] = std::move(proto);
     }
   } else
     get_next_tok();
 }
 
-static void handle_top_lev_expr() {
-  if (auto top_as_fn_ast = parse_top_lev_expr()) {
-    if (auto *fn_ir = top_as_fn_ast->codegen()) {
-      fprintf(stderr, "Read top-level expression:\n\n");
-      fn_ir->print(llvm::errs());
-      fprintf(stderr, "\n");
+static void handle_top_level_expr() {
+  if (auto fn_ast = parse_top_lev_expr()) {
+    if (fn_ast->codegen()) {
 
-      // Remove the anonymous expression.
-      fn_ir->eraseFromParent();
+      auto rt = JIT->getMainJITDylib().createResourceTracker();
+
+      auto tsm = orc::ThreadSafeModule(std::move(MODULE), std::move(CTX));
+      EXIT_ON_ERR(JIT->addModule(std::move(tsm), rt));
+      init_module_and_mgrs();
+
+      auto expr_sym = EXIT_ON_ERR(JIT->lookup("__anon_expr"));
+
+      double (*FP)() = expr_sym.getAddress().toPtr<double (*)()>();
+      fprintf(stderr, "Evaluated to %f\n", FP());
+
+      EXIT_ON_ERR(rt->remove());
     }
   } else
     get_next_tok();
@@ -537,7 +613,7 @@ static void LOOP() {
       handle_extern();
       break;
     default:
-      handle_top_lev_expr();
+      handle_top_level_expr();
       break;
     } // sw
   } // wh
@@ -548,6 +624,10 @@ static void LOOP() {
 // #####################################################################################
 
 int main() {
+  InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  InitializeNativeTargetAsmParser();
+
   // setup binops, 1 is lowest
   BINOP_PREC['<'] = 10;
   BINOP_PREC['+'] = 20;
@@ -557,10 +637,16 @@ int main() {
   fprintf(stderr, "ready> ");
   get_next_tok(); // first token
 
-  init_module();
+  JIT = EXIT_ON_ERR(orc::KaleidoscopeJIT::Create());
+
+  init_module_and_mgrs();
+
   LOOP();
 
   printf("\n");
+
   MODULE->print(llvm::errs(), nullptr);
   printf("\n");
+
+  return 0;
 }

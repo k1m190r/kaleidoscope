@@ -17,7 +17,7 @@ CFLAG3 = llvm-config --cxxflags
 CFLAGS = $(CFLAGS0) $(CFLAGS1) $(CFLAGS2)
 
 # -static-libstdc++ : to prevent ASAN: alloc-dealloc-mismatch on exception
-LDLIBS_LLVM = `llvm-config-20 --ldflags --system-libs --libs core`
+LDLIBS_LLVM = `llvm-config-20 --ldflags --system-libs --libs core orcjit native`
 LDLIBS = $(LDLIBS_LLVM) -static-libstdc++
 
 # get the top most directory
