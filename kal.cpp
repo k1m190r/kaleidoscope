@@ -52,6 +52,11 @@ enum Token {
   // primary
   TOK_IDENT = -4,
   TOK_NUM = -5,
+
+  // control
+  TOK_IF = -6,
+  TOK_THEN = -7,
+  TOK_ELSE = -8
 };
 
 static string IDENT_STR; // ← tok_ident
@@ -78,6 +83,12 @@ static int get_tok() {
       return TOK_DEF;
     if (IDENT_STR == "extern")
       return TOK_EXTERN;
+    if (IDENT_STR == "if")
+      return TOK_IF;
+    if (IDENT_STR == "then")
+      return TOK_THEN;
+    if (IDENT_STR == "else")
+      return TOK_ELSE;
     return TOK_IDENT;
   }
 
@@ -126,6 +137,8 @@ public:
   virtual Value *codegen() = 0;
 };
 
+using UP_AST = unique_ptr<Expr_AST>;
+
 // ###################
 class Num_Expr_AST : public Expr_AST {
   double Val;
@@ -147,10 +160,10 @@ public:
 // ###################
 class Bin_Expr_AST : public Expr_AST {
   char Op;
-  unique_ptr<Expr_AST> Lhs, Rhs;
+  UP_AST Lhs, Rhs;
 
 public:
-  Bin_Expr_AST(char op, unique_ptr<Expr_AST> lhs, unique_ptr<Expr_AST> rhs)
+  Bin_Expr_AST(char op, UP_AST lhs, UP_AST rhs)
       : Op(op), Lhs(std::move(lhs)), Rhs(std::move(rhs)) {}
   Value *codegen() override;
 };
@@ -158,10 +171,10 @@ public:
 // ###################
 class Call_Expr_AST : public Expr_AST {
   string Callee;
-  vector<unique_ptr<Expr_AST>> Args;
+  vector<UP_AST> Args;
 
 public:
-  Call_Expr_AST(const string &callee, vector<unique_ptr<Expr_AST>> args)
+  Call_Expr_AST(const string &callee, vector<UP_AST> args)
       : Callee(callee), Args(std::move(args)) {}
   Value *codegen() override;
 };
@@ -182,12 +195,23 @@ public:
 // ###################
 class Func_AST {
   unique_ptr<Proto_AST> Proto;
-  unique_ptr<Expr_AST> Body;
+  UP_AST Body;
 
 public:
-  Func_AST(unique_ptr<Proto_AST> proto, unique_ptr<Expr_AST> body)
+  Func_AST(unique_ptr<Proto_AST> proto, UP_AST body)
       : Proto(std::move(proto)), Body(std::move(body)) {}
   Function *codegen();
+};
+
+// ###################
+class If_Expr_AST : public Expr_AST {
+  UP_AST Cond, Then, Else;
+
+public:
+  If_Expr_AST(UP_AST cond, UP_AST then, UP_AST _else)
+      : Cond(std::move(cond)), Then(std::move(then)), Else(std::move(_else)) {}
+
+  Value *codegen() override;
 };
 
 } // namespace
@@ -213,7 +237,7 @@ static int get_prec_of_tok() {
   return tok_prec;
 }
 
-unique_ptr<Expr_AST> LOG_ERR(const char *msg) {
+UP_AST LOG_ERR(const char *msg) {
   fprintf(stderr, "Error: %s\n", msg);
   return nullptr;
 }
@@ -223,17 +247,17 @@ unique_ptr<Proto_AST> LOG_ERR_P(const char *msg) {
   return nullptr;
 }
 
-static unique_ptr<Expr_AST> parse_expr();
+static UP_AST parse_expr(); // FWD
 
 // num ::= num
-static unique_ptr<Expr_AST> parse_num_expr() {
+static UP_AST parse_num_expr() {
   auto res = make_unique<Num_Expr_AST>(NUM_VAL);
   get_next_tok();
   return std::move(res);
 }
 
 // paren_expr ::= '(' expr ')'
-static unique_ptr<Expr_AST> parse_paren_expr() {
+static UP_AST parse_paren_expr() {
   get_next_tok(); // eat (
   auto v = parse_expr();
   if (!v)
@@ -245,7 +269,7 @@ static unique_ptr<Expr_AST> parse_paren_expr() {
 }
 
 // ident_expr, ::= ident, ::= ident '(' expr* ')'
-static unique_ptr<Expr_AST> parse_ident_expr() {
+static UP_AST parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
@@ -253,7 +277,7 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
     return make_unique<Var_Expr_AST>(ident_name);
 
   get_next_tok(); // eat (
-  vector<unique_ptr<Expr_AST>> args;
+  vector<UP_AST> args;
   if (CURR_TOK_KIND != ')') {
     while (true) {
       if (auto arg = parse_expr())
@@ -273,8 +297,10 @@ static unique_ptr<Expr_AST> parse_ident_expr() {
   return make_unique<Call_Expr_AST>(ident_name, std::move(args));
 }
 
-// primary ::= < ident_expr | num_expr | paren_expr >
-static unique_ptr<Expr_AST> parse_prime() {
+static UP_AST parse_if_expr(); // FWD
+
+// primary ::= < ident_expr | num_expr | paren_expr | if_expr>
+static UP_AST parse_prima() {
   switch (CURR_TOK_KIND) {
   default:
     return LOG_ERR("unknown token when expecting an expression");
@@ -284,13 +310,14 @@ static unique_ptr<Expr_AST> parse_prime() {
     return parse_num_expr();
   case '(':
     return parse_paren_expr();
+  case TOK_IF:
+    return parse_if_expr();
   }
 }
 
 // after lhs is parsed [ + primary]
 // binop_rhs ::= ('+' primary)*
-static unique_ptr<Expr_AST> parse_binop_rhs(int expr_prec,
-                                            unique_ptr<Expr_AST> lhs) {
+static UP_AST parse_binop_rhs(int expr_prec, UP_AST lhs) {
   while (true) {
     int tok_prec = get_prec_of_tok();
 
@@ -300,7 +327,7 @@ static unique_ptr<Expr_AST> parse_binop_rhs(int expr_prec,
     int binop = CURR_TOK_KIND;
     get_next_tok(); // eat binop
 
-    auto rhs = parse_prime();
+    auto rhs = parse_prima();
     if (!rhs)
       return nullptr;
 
@@ -317,8 +344,8 @@ static unique_ptr<Expr_AST> parse_binop_rhs(int expr_prec,
 }
 
 // expr ::= primary binop_rhs
-static unique_ptr<Expr_AST> parse_expr() {
-  auto lhs = parse_prime();
+static UP_AST parse_expr() {
+  auto lhs = parse_prima();
   if (!lhs)
     return nullptr;
   return parse_binop_rhs(0, std::move(lhs));
@@ -373,6 +400,36 @@ static unique_ptr<Proto_AST> parse_extern() {
   return parse_proto();
 }
 
+// if_expr ::= 'if' expr 'then' expr 'else' expr
+static UP_AST parse_if_expr() {
+  get_next_tok();
+
+  auto cond = parse_expr();
+  if (!cond)
+    return nullptr;
+
+  if (CURR_TOK_KIND != TOK_THEN)
+    return LOG_ERR("expected then");
+
+  get_next_tok();
+
+  auto then = parse_expr();
+  if (!then)
+    return nullptr;
+
+  if (CURR_TOK_KIND != TOK_ELSE)
+    return LOG_ERR("expected else");
+
+  get_next_tok();
+
+  auto _else = parse_expr();
+  if (!_else)
+    return nullptr;
+
+  return make_unique<If_Expr_AST>(std::move(cond), std::move(then),
+                                  std::move(_else));
+};
+
 // #####################################################################################
 // # codegen()
 // #####################################################################################
@@ -423,8 +480,8 @@ Value *Var_Expr_AST::codegen() {
 }
 
 Value *Bin_Expr_AST::codegen() {
-  Value *l = Lhs->codegen();
-  Value *r = Rhs->codegen();
+  auto *l = Lhs->codegen();
+  auto *r = Rhs->codegen();
 
   if (!l || !r)
     return nullptr;
@@ -459,6 +516,53 @@ Value *Call_Expr_AST::codegen() {
       return nullptr;
   }
   return IR_BLD->CreateCall(callee_fn, args_v, "call");
+}
+
+Value *If_Expr_AST::codegen() {
+  Value *cond_v = Cond->codegen();
+  if (!cond_v)
+    return nullptr;
+
+  // convert cond to bool
+  cond_v = IR_BLD->CreateFCmpONE(cond_v, ConstantFP::get(*CTX, APFloat(0.0)),
+                                 "Ifcond");
+  Function *fn = IR_BLD->GetInsertBlock()->getParent();
+
+  // block for {then, else}
+  auto then_bb = BasicBlock::Create(*CTX, "then", fn);
+  auto else_bb = BasicBlock::Create(*CTX, "else");
+  auto merge_bb = BasicBlock::Create(*CTX, "ifcond");
+
+  IR_BLD->CreateCondBr(cond_v, then_bb, else_bb);
+
+  // emit then value
+  IR_BLD->SetInsertPoint(then_bb);
+  auto then_v = Then->codegen();
+  if (!then_v)
+    return nullptr;
+
+  IR_BLD->CreateBr(merge_bb);
+
+  then_bb = IR_BLD->GetInsertBlock();
+
+  // emit else block
+  fn->insert(fn->end(), else_bb);
+  IR_BLD->SetInsertPoint(else_bb);
+  auto else_v = Else->codegen();
+  if (!else_v)
+    return nullptr;
+
+  IR_BLD->CreateBr(merge_bb);
+  else_bb = IR_BLD->GetInsertBlock();
+
+  // emit merge block
+  fn->insert(fn->end(), merge_bb);
+  IR_BLD->SetInsertPoint(merge_bb);
+  auto *phi = IR_BLD->CreatePHI(Type::getDoubleTy(*CTX), 2, "if");
+
+  phi->addIncoming(then_v, then_bb);
+  phi->addIncoming(else_v, else_bb);
+  return phi;
 }
 
 Function *Proto_AST::codegen() {

@@ -1,5 +1,5 @@
-NAME = toy
-CFILE = toy
+NAME = kal
+CFILE = kal
 CPP = clang++-20
 
 # -stdlib=libc++ : for std::print

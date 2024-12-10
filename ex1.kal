@@ -1,3 +1,5 @@
 def foo(a b) a*a + 2*a*b + b*b;
 def bar(a) foo(a, 4.0) + bar(31337);
 extern cos(x);
+
+def fib(x) if x < 3 then 1 else fib(x-1)+fib(x-2);
