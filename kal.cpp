@@ -137,7 +137,7 @@ public:
   virtual Value *codegen() = 0;
 };
 
-using UP_AST = unique_ptr<Expr_AST>;
+using UP_EAST = unique_ptr<Expr_AST>;
 
 // ###################
 class Num_Expr_AST : public Expr_AST {
@@ -160,10 +160,10 @@ public:
 // ###################
 class Bin_Expr_AST : public Expr_AST {
   char Op;
-  UP_AST Lhs, Rhs;
+  UP_EAST Lhs, Rhs;
 
 public:
-  Bin_Expr_AST(char op, UP_AST lhs, UP_AST rhs)
+  Bin_Expr_AST(char op, UP_EAST lhs, UP_EAST rhs)
       : Op(op), Lhs(std::move(lhs)), Rhs(std::move(rhs)) {}
   Value *codegen() override;
 };
@@ -171,10 +171,10 @@ public:
 // ###################
 class Call_Expr_AST : public Expr_AST {
   string Callee;
-  vector<UP_AST> Args;
+  vector<UP_EAST> Args;
 
 public:
-  Call_Expr_AST(const string &callee, vector<UP_AST> args)
+  Call_Expr_AST(const string &callee, vector<UP_EAST> args)
       : Callee(callee), Args(std::move(args)) {}
   Value *codegen() override;
 };
@@ -191,24 +191,25 @@ public:
   const string &getName() const { return Name; }
   Function *codegen();
 };
+using UP_PAST = unique_ptr<Proto_AST>;
 
 // ###################
 class Func_AST {
-  unique_ptr<Proto_AST> Proto;
-  UP_AST Body;
+  UP_PAST Proto;
+  UP_EAST Body;
 
 public:
-  Func_AST(unique_ptr<Proto_AST> proto, UP_AST body)
+  Func_AST(UP_PAST proto, UP_EAST body)
       : Proto(std::move(proto)), Body(std::move(body)) {}
   Function *codegen();
 };
 
 // ###################
 class If_Expr_AST : public Expr_AST {
-  UP_AST Cond, Then, Else;
+  UP_EAST Cond, Then, Else;
 
 public:
-  If_Expr_AST(UP_AST cond, UP_AST then, UP_AST _else)
+  If_Expr_AST(UP_EAST cond, UP_EAST then, UP_EAST _else)
       : Cond(std::move(cond)), Then(std::move(then)), Else(std::move(_else)) {}
 
   Value *codegen() override;
@@ -237,27 +238,27 @@ static int get_prec_of_tok() {
   return tok_prec;
 }
 
-UP_AST LOG_ERR(const char *msg) {
+UP_EAST LOG_ERR(const char *msg) {
   fprintf(stderr, "Error: %s\n", msg);
   return nullptr;
 }
 
-unique_ptr<Proto_AST> LOG_ERR_P(const char *msg) {
+UP_PAST LOG_ERR_P(const char *msg) {
   LOG_ERR(msg);
   return nullptr;
 }
 
-static UP_AST parse_expr(); // FWD
+static UP_EAST parse_expr(); // FWD
 
 // num ::= num
-static UP_AST parse_num_expr() {
+static UP_EAST parse_num_expr() {
   auto res = make_unique<Num_Expr_AST>(NUM_VAL);
   get_next_tok();
   return std::move(res);
 }
 
 // paren_expr ::= '(' expr ')'
-static UP_AST parse_paren_expr() {
+static UP_EAST parse_paren_expr() {
   get_next_tok(); // eat (
   auto v = parse_expr();
   if (!v)
@@ -269,7 +270,7 @@ static UP_AST parse_paren_expr() {
 }
 
 // ident_expr, ::= ident, ::= ident '(' expr* ')'
-static UP_AST parse_ident_expr() {
+static UP_EAST parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
@@ -277,7 +278,7 @@ static UP_AST parse_ident_expr() {
     return make_unique<Var_Expr_AST>(ident_name);
 
   get_next_tok(); // eat (
-  vector<UP_AST> args;
+  vector<UP_EAST> args;
   if (CURR_TOK_KIND != ')') {
     while (true) {
       if (auto arg = parse_expr())
@@ -297,10 +298,10 @@ static UP_AST parse_ident_expr() {
   return make_unique<Call_Expr_AST>(ident_name, std::move(args));
 }
 
-static UP_AST parse_if_expr(); // FWD
+static UP_EAST parse_if_expr(); // FWD
 
 // primary ::= < ident_expr | num_expr | paren_expr | if_expr>
-static UP_AST parse_prima() {
+static UP_EAST parse_prima() {
   switch (CURR_TOK_KIND) {
   default:
     return LOG_ERR("unknown token when expecting an expression");
@@ -317,7 +318,7 @@ static UP_AST parse_prima() {
 
 // after lhs is parsed [ + primary]
 // binop_rhs ::= ('+' primary)*
-static UP_AST parse_binop_rhs(int expr_prec, UP_AST lhs) {
+static UP_EAST parse_binop_rhs(int expr_prec, UP_EAST lhs) {
   while (true) {
     int tok_prec = get_prec_of_tok();
 
@@ -344,7 +345,7 @@ static UP_AST parse_binop_rhs(int expr_prec, UP_AST lhs) {
 }
 
 // expr ::= primary binop_rhs
-static UP_AST parse_expr() {
+static UP_EAST parse_expr() {
   auto lhs = parse_prima();
   if (!lhs)
     return nullptr;
@@ -352,7 +353,7 @@ static UP_AST parse_expr() {
 }
 
 // prototype ::= id '(' id* ')'
-static unique_ptr<Proto_AST> parse_proto() {
+static UP_PAST parse_proto() {
   if (CURR_TOK_KIND != TOK_IDENT)
     return LOG_ERR_P("expected func name in prototype");
 
@@ -395,13 +396,13 @@ static unique_ptr<Func_AST> parse_top_lev_expr() {
 }
 
 // extern ::= 'extern' proto
-static unique_ptr<Proto_AST> parse_extern() {
+static UP_PAST parse_extern() {
   get_next_tok(); // eat extern
   return parse_proto();
 }
 
 // if_expr ::= 'if' expr 'then' expr 'else' expr
-static UP_AST parse_if_expr() {
+static UP_EAST parse_if_expr() {
   get_next_tok();
 
   auto cond = parse_expr();
@@ -451,7 +452,7 @@ static unique_ptr<ModuleAnalysisManager> MAM;
 
 static unique_ptr<PassInstrumentationCallbacks> PIC;
 static unique_ptr<StandardInstrumentations> SI;
-static std::map<string, unique_ptr<Proto_AST>> FUNC_PROTOs;
+static std::map<string, UP_PAST> FUNC_PROTOs;
 static ExitOnError EXIT_ON_ERR;
 
 Value *LogErrorV(const char *msg) {
