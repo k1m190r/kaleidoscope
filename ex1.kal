@@ -1,5 +1,21 @@
+# basic
 def foo(a b) a*a + 2*a*b + b*b;
 def bar(a) foo(a, 4.0) + bar(31337);
 extern cos(x);
 
-def fib(x) if x < 3 then 1 else fib(x-1)+fib(x-2);
+# conditionals
+def fib(x) 
+    if (x < 3) then 
+        1 
+    else 
+        fib(x-1)+fib(x-2);
+
+# extern and for loop
+extern putchard(char);
+
+def printstar(n)
+    for i = 1, i < n, 1.0 in
+        putchard(42);  # ascii 42 = '*'
+
+# print 100 '*' characters
+printstar(100);

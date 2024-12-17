@@ -38,17 +38,13 @@ private:
 public:
   KaleidoscopeJIT(unique_ptr<ExecutionSession> es, JITTargetMachineBuilder jtmb,
                   DataLayout dl)
-      : // init
-        ES(std::move(es)), DL(std::move(dl)), Mangle(*this->ES, this->DL),
-        ObjLayer(*this->ES,
-                 []() { return make_unique<SectionMemoryManager>(); }),
+      : ES(std::move(es)), DL(std::move(dl)), Mangle(*this->ES, this->DL),
+        ObjLayer(*this->ES, []() { return make_unique<SectionMemoryManager>(); }),
         CompLayer(*this->ES, ObjLayer,
                   make_unique<ConcurrentIRCompiler>(std::move(jtmb))),
         MainJD(this->ES->createBareJITDylib("<main>")) {
-    // body
-    MainJD.addGenerator(
-        cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(
-            dl.getGlobalPrefix())));
+    MainJD.addGenerator(cantFail(
+        DynamicLibrarySearchGenerator::GetForCurrentProcess(dl.getGlobalPrefix())));
     if (jtmb.getTargetTriple().isOSBinFormatCOFF()) {
       ObjLayer.setOverrideObjectFlagsWithResponsibilityFlags(true);
       ObjLayer.setAutoClaimResponsibilityForObjectSymbols(true);
@@ -60,35 +56,42 @@ public:
       ES->reportError(std::move(err));
   }
 
-  static Expected<unique_ptr<KaleidoscopeJIT>> Create() {
+  static Expected<unique_ptr<KaleidoscopeJIT>>
+  Create() {
     auto epc = SelfExecutorProcessControl::Create();
     if (!epc)
       return epc.takeError();
 
     auto es = make_unique<ExecutionSession>(std::move(*epc));
 
-    JITTargetMachineBuilder jtmb(
-        es->getExecutorProcessControl().getTargetTriple());
+    JITTargetMachineBuilder jtmb(es->getExecutorProcessControl().getTargetTriple());
 
     auto dl = jtmb.getDefaultDataLayoutForTarget();
     if (!dl)
       return dl.takeError();
 
-    return make_unique<KaleidoscopeJIT>(std::move(es), std::move(jtmb),
-                                        std::move(*dl));
+    return make_unique<KaleidoscopeJIT>(std::move(es), std::move(jtmb), std::move(*dl));
   }
 
-  const DataLayout &getDataLayout() const { return DL; }
+  const DataLayout &
+  getDataLayout() const {
+    return DL;
+  }
 
-  JITDylib &getMainJITDylib() { return MainJD; }
+  JITDylib &
+  getMainJITDylib() {
+    return MainJD;
+  }
 
-  Error addModule(ThreadSafeModule tsm, ResourceTrackerSP rt = nullptr) {
+  Error
+  addModule(ThreadSafeModule tsm, ResourceTrackerSP rt = nullptr) {
     if (!rt)
       rt = MainJD.getDefaultResourceTracker();
     return CompLayer.add(rt, std::move(tsm));
   }
 
-  Expected<ExecutorSymbolDef> lookup(StringRef name) {
+  Expected<ExecutorSymbolDef>
+  lookup(StringRef name) {
     return ES->lookup({&MainJD}, Mangle(name.str()));
   }
 };

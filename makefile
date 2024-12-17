@@ -12,13 +12,18 @@ CFLAGS1 = -O3 -march=native -mavx2
 CFLAGS2 = -Wall -Wextra -pedantic -fsanitize=address # -Werror
 
 # llvm 
-CFLAG3 = llvm-config --cxxflags
+CFLAG3 = llvm-config-20 --cxxflags
 
 CFLAGS = $(CFLAGS0) $(CFLAGS1) $(CFLAGS2)
 
 # -static-libstdc++ : to prevent ASAN: alloc-dealloc-mismatch on exception
 LDLIBS_LLVM = `llvm-config-20 --ldflags --system-libs --libs core orcjit native`
-LDLIBS = $(LDLIBS_LLVM) -static-libstdc++
+
+# https://stackoverflow.com/a/62528308/678491
+# https://stackoverflow.com/a/30468391/678491
+LDFLAGS = -Wl,--export-dynamic # -rdynamic # -Xlinker --export-dynamic
+
+LDLIBS = $(LDLIBS_LLVM) $(LDFLAGS) -static-libstdc++ 
 
 # get the top most directory
 # DIR = $(shell python -c "import os; print(sorted([x for x in os.listdir() if x[0]!='.'])[0])")

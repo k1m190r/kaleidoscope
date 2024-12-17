@@ -1,4 +1,3 @@
----
 BasedOnStyle: LLVM
 ColumnLimit: 88
-...
+AlwaysBreakAfterReturnType: AllDefinitions
