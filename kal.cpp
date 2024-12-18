@@ -533,11 +533,13 @@ static std::map<string, Value *> NAMED_VALs;
 static unique_ptr<orc::KaleidoscopeJIT> JIT;
 static unique_ptr<FunctionPassManager> FPM;
 
+// analisys
 static unique_ptr<LoopAnalysisManager> LAM;
 static unique_ptr<FunctionAnalysisManager> FAM;
 static unique_ptr<CGSCCAnalysisManager> CGAM;
 static unique_ptr<ModuleAnalysisManager> MAM;
 
+// instruments
 static unique_ptr<PassInstrumentationCallbacks> PIC;
 static unique_ptr<StandardInstrumentations> SI;
 static std::map<string, UP_PAST> FUNC_PROTOs;
@@ -626,40 +628,39 @@ If_Expr_AST::codegen() {
       BLD_IR->CreateFCmpONE(cond_v, ConstantFP::get(*CTX, APFloat(0.0)), "if_cond");
   Function *fn = BLD_IR->GetInsertBlock()->getParent();
 
-  // block for {then, else}
-  auto then_bb = BasicBlock::Create(*CTX, "then", fn);
-  auto else_bb = BasicBlock::Create(*CTX, "else");
-  auto merge_bb = BasicBlock::Create(*CTX, "if_cont");
+  // create blocks for {then, else}
+  auto then_blk = BasicBlock::Create(*CTX, "then", fn);
+  auto else_blk = BasicBlock::Create(*CTX, "else");
+  auto merge_blk = BasicBlock::Create(*CTX, "if_cont");
 
-  BLD_IR->CreateCondBr(cond_v, then_bb, else_bb);
+  BLD_IR->CreateCondBr(cond_v, then_blk, else_blk);
 
-  // emit then value
-  BLD_IR->SetInsertPoint(then_bb);
+  // emit then into then_blk
+  BLD_IR->SetInsertPoint(then_blk);
   auto then_v = Then->codegen();
   if (!then_v)
     return nullptr;
 
-  BLD_IR->CreateBr(merge_bb);
+  BLD_IR->CreateBr(merge_blk);
+  then_blk = BLD_IR->GetInsertBlock();
 
-  then_bb = BLD_IR->GetInsertBlock();
-
-  // emit else block
-  fn->insert(fn->end(), else_bb);
-  BLD_IR->SetInsertPoint(else_bb);
+  // emit else into else_blk
+  fn->insert(fn->end(), else_blk);
+  BLD_IR->SetInsertPoint(else_blk);
   auto else_v = Else->codegen();
   if (!else_v)
     return nullptr;
 
-  BLD_IR->CreateBr(merge_bb);
-  else_bb = BLD_IR->GetInsertBlock();
+  BLD_IR->CreateBr(merge_blk);
+  else_blk = BLD_IR->GetInsertBlock();
 
-  // emit merge block
-  fn->insert(fn->end(), merge_bb);
-  BLD_IR->SetInsertPoint(merge_bb);
+  // emit phi into merge_blk
+  fn->insert(fn->end(), merge_blk);
+  BLD_IR->SetInsertPoint(merge_blk);
+
   auto *phi = BLD_IR->CreatePHI(Type::getDoubleTy(*CTX), 2, "if_");
-
-  phi->addIncoming(then_v, then_bb);
-  phi->addIncoming(else_v, else_bb);
+  phi->addIncoming(then_v, then_blk);
+  phi->addIncoming(else_v, else_blk);
   return phi;
 }
 
@@ -671,7 +672,7 @@ For_Expr_AST::codegen() {
   if (!start_v)
     return nullptr;
 
-  // make blocks for the loop haeader
+  // make blocks for the loop header
   auto fn = BLD_IR->GetInsertBlock()->getParent();
   auto pre_header_bb = BLD_IR->GetInsertBlock();
   auto loop_bb = BasicBlock::Create(*CTX, "loop", fn);
@@ -793,11 +794,14 @@ init_module_and_mgrs() {
 
   // new pass and analysis managers
   FPM = make_unique<FunctionPassManager>();
+
+  // analisys
   LAM = make_unique<LoopAnalysisManager>();
   FAM = make_unique<FunctionAnalysisManager>();
   CGAM = make_unique<CGSCCAnalysisManager>();
   MAM = make_unique<ModuleAnalysisManager>();
 
+  // instruments
   PIC = make_unique<PassInstrumentationCallbacks>();
   SI = make_unique<StandardInstrumentations>(*CTX, true); // debug logging t/f
   SI->registerCallbacks(*PIC, MAM.get());

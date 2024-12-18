@@ -10,6 +10,8 @@ def fib(x)
     else 
         fib(x-1)+fib(x-2);
 
+fib(6);
+
 # extern and for loop
 extern putchard(char);
 
