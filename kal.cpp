@@ -9,6 +9,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -24,6 +25,7 @@
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
+#include <cassert>
 #include <cctype>  // is...{space digit alpha alnum ascii}
 #include <cstdio>  // getchar fprintf EOF
 #include <cstdlib> // strtod
@@ -35,8 +37,13 @@
 
 using namespace llvm;
 
-using std::string, std::vector;
-using std::unique_ptr, std::make_unique;
+using std::string, std::vector, std::unique_ptr, std::make_unique;
+
+template <class T>
+constexpr auto
+MV(T &&arg) noexcept -> decltype(std::move(arg)) {
+  return std::move(arg);
+}
 
 // #####################################################################################
 // # LEXER
@@ -59,7 +66,11 @@ enum Token {
   TOK_THEN = -7,
   TOK_ELSE = -8,
   TOK_FOR = -9,
-  TOK_IN = -10
+  TOK_IN = -10,
+
+  // operators
+  TOK_BINARY = -11,
+  TOK_UNARY = -12
 };
 
 static string IDENT_STR; // ← tok_ident
@@ -97,6 +108,10 @@ get_tok() {
       return TOK_FOR;
     if (IDENT_STR == "in")
       return TOK_IN;
+    if (IDENT_STR == "binary")
+      return TOK_BINARY;
+    if (IDENT_STR == "unary")
+      return TOK_UNARY;
     return TOK_IDENT;
   }
 
@@ -114,9 +129,9 @@ get_tok() {
 
   // comments till end of line
   if (last_ch == '#') {
-    do {
+    do
       last_ch = getchar();
-    } while (last_ch != EOF && last_ch != '\n' && last_ch != '\r');
+    while (last_ch != EOF && last_ch != '\n' && last_ch != '\r');
 
     if (last_ch != EOF)
       return get_tok();
@@ -138,7 +153,6 @@ get_tok() {
 
 namespace {
 
-// ###################
 class Expr_AST {
 public:
   virtual ~Expr_AST() = default;
@@ -147,7 +161,6 @@ public:
 
 using UP_EAST = unique_ptr<Expr_AST>;
 
-// ###################
 class Num_Expr_AST : public Expr_AST {
   double Val;
 
@@ -156,7 +169,6 @@ public:
   Value *codegen() override;
 };
 
-// ###################
 class Var_Expr_AST : public Expr_AST {
   string Name;
 
@@ -165,68 +177,44 @@ public:
   Value *codegen() override;
 };
 
-// ###################
+class Unary_Expr_AST : public Expr_AST {
+  char Opcode;
+  UP_EAST Operand;
+
+public:
+  Unary_Expr_AST(char opcode, UP_EAST operand) : Opcode(opcode), Operand(MV(operand)) {}
+  Value *codegen() override;
+};
+
 class Bin_Expr_AST : public Expr_AST {
   char Op;
   UP_EAST Lhs, Rhs;
 
 public:
   Bin_Expr_AST(char op, UP_EAST lhs, UP_EAST rhs)
-      : Op(op), Lhs(std::move(lhs)), Rhs(std::move(rhs)) {}
+      : Op(op), Lhs(MV(lhs)), Rhs(MV(rhs)) {}
   Value *codegen() override;
 };
 
-// ###################
 class Call_Expr_AST : public Expr_AST {
   string Callee;
   vector<UP_EAST> Args;
 
 public:
   Call_Expr_AST(const string &callee, vector<UP_EAST> args)
-      : Callee(callee), Args(std::move(args)) {}
+      : Callee(callee), Args(MV(args)) {}
   Value *codegen() override;
 };
 
-// ###################
-class Proto_AST {
-  string Name;
-  vector<string> Args;
-
-public:
-  Proto_AST(const string &name, vector<string> args)
-      : Name(name), Args(std::move(args)) {}
-
-  const string &
-  getName() const {
-    return Name;
-  }
-  Function *codegen();
-};
-using UP_PAST = unique_ptr<Proto_AST>;
-
-// ###################
-class Func_AST {
-  UP_PAST Proto;
-  UP_EAST Body;
-
-public:
-  Func_AST(UP_PAST proto, UP_EAST body)
-      : Proto(std::move(proto)), Body(std::move(body)) {}
-  Function *codegen();
-};
-
-// ###################
 class If_Expr_AST : public Expr_AST {
   UP_EAST Cond, Then, Else;
 
 public:
   If_Expr_AST(UP_EAST cond, UP_EAST then, UP_EAST _else)
-      : Cond(std::move(cond)), Then(std::move(then)), Else(std::move(_else)) {}
-
+      : Cond(MV(cond)), Then(MV(then)), Else(MV(_else)) {}
   Value *codegen() override;
 };
 
-// ###################
 class For_Expr_AST : public Expr_AST {
   string Var_Name;
   UP_EAST Start, End, Step, Body;
@@ -234,9 +222,60 @@ class For_Expr_AST : public Expr_AST {
 public:
   For_Expr_AST(const string &var_name, UP_EAST start, UP_EAST end, UP_EAST step,
                UP_EAST body)
-      : Var_Name(var_name), Start(std::move(start)), End(std::move(end)),
-        Step(std::move(step)), Body(std::move(body)) {}
-  Value *codegen() override;
+      : Var_Name(var_name), Start(MV(start)), End(MV(end)), Step(MV(step)),
+        Body(MV(body)) {}
+
+        Value *codegen() override;
+};
+
+class Proto_AST {
+  string Name;
+  vector<string> Args;
+  bool Is_Op;
+  unsigned Precedence;
+
+public:
+  Proto_AST(const string &name, vector<string> args, bool is_op = false,
+            unsigned prec = 0)
+      : Name(name), Args(MV(args)), Is_Op(is_op), Precedence(prec) {}
+
+  Function *codegen();
+
+  const string &
+  getName() const {
+    return Name;
+  }
+
+  bool
+  is_unary_op() const {
+    return Is_Op && Args.size() == 1;
+  }
+  bool
+  is_binary_op() const {
+    return Is_Op && Args.size() == 2;
+  }
+
+  char
+  get_op_name() const {
+    assert(is_unary_op() || is_binary_op());
+    return Name[Name.size() - 1];
+  }
+
+  unsigned
+  get_bin_precedence() const {
+    return Precedence;
+  }
+};
+
+using UP_PAST = unique_ptr<Proto_AST>;
+
+class Func_AST {
+  UP_PAST Proto;
+  UP_EAST Body;
+
+public:
+  Func_AST(UP_PAST proto, UP_EAST body) : Proto(MV(proto)), Body(MV(body)) {}
+  Function *codegen();
 };
 
 } // namespace
@@ -286,7 +325,7 @@ static UP_EAST
 parse_num_expr() {
   auto res = make_unique<Num_Expr_AST>(NUM_VAL);
   get_next_tok();
-  return std::move(res);
+  return MV(res);
 }
 
 // paren_expr ::= '(' expr ')'
@@ -296,6 +335,7 @@ parse_paren_expr() {
   auto v = parse_expr();
   if (!v)
     return nullptr;
+
   if (CURR_TOK_KIND != ')')
     return LOG_ERR("expected ')'");
   get_next_tok(); // eat )
@@ -308,15 +348,16 @@ parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
-  if (CURR_TOK_KIND != '(')
+  if (CURR_TOK_KIND != '(') // variable
     return make_unique<Var_Expr_AST>(ident_name);
 
+  // Call
   get_next_tok(); // eat (
   vector<UP_EAST> args;
   if (CURR_TOK_KIND != ')') {
     while (true) {
       if (auto arg = parse_expr())
-        args.push_back(std::move(arg));
+        args.push_back(MV(arg));
       else
         return nullptr;
 
@@ -329,7 +370,8 @@ parse_ident_expr() {
     }
   }
   get_next_tok(); // eat )
-  return make_unique<Call_Expr_AST>(ident_name, std::move(args));
+
+  return make_unique<Call_Expr_AST>(ident_name, MV(args));
 }
 
 // if_expr ::= 'if' expr 'then' expr 'else' expr
@@ -343,8 +385,7 @@ parse_if_expr() {
 
   if (CURR_TOK_KIND != TOK_THEN)
     return LOG_ERR("expected then");
-
-  get_next_tok();
+  get_next_tok(); // eat then
 
   auto then = parse_expr();
   if (!then)
@@ -352,14 +393,13 @@ parse_if_expr() {
 
   if (CURR_TOK_KIND != TOK_ELSE)
     return LOG_ERR("expected else");
-
-  get_next_tok();
+  get_next_tok(); // eat else
 
   auto _else = parse_expr();
   if (!_else)
     return nullptr;
 
-  return make_unique<If_Expr_AST>(std::move(cond), std::move(then), std::move(_else));
+  return make_unique<If_Expr_AST>(MV(cond), MV(then), MV(_else));
 }
 
 // for_expr ::= 'for' ident '=' expr ',' expr (',', expr)? 'in' expr
@@ -405,13 +445,12 @@ parse_for_expr() {
   if (!body)
     return nullptr;
 
-  return make_unique<For_Expr_AST>(ident_name, std::move(start), std::move(end),
-                                   std::move(step), std::move(body));
+  return make_unique<For_Expr_AST>(ident_name, MV(start), MV(end), MV(step), MV(body));
 }
 
 // primary ::= < ident_expr | num_expr | paren_expr | if_expr | for_expr >
 static UP_EAST
-parse_prima() {
+parse_primary() {
   switch (CURR_TOK_KIND) {
   default:
     return LOG_ERR("unknown token when expecting an expression");
@@ -428,8 +467,23 @@ parse_prima() {
   }
 }
 
+// unary
+//   ::= primary
+//   ::= '!' unary
+static UP_EAST
+parse_unary() {
+  if (!isascii(CURR_TOK_KIND) || CURR_TOK_KIND == '(' || CURR_TOK_KIND == ',')
+    return parse_primary();
+
+  int opr = CURR_TOK_KIND;
+  get_next_tok();
+  if (auto opd = parse_unary())
+    return make_unique<Unary_Expr_AST>(opr, MV(opd));
+  return nullptr;
+}
+
 // after lhs is parsed [ + primary]
-// binop_rhs ::= ('+' primary)*
+// binop_rhs ::= ('+' unary)*
 static UP_EAST
 parse_binop_rhs(int expr_prec, UP_EAST lhs) {
   while (true) {
@@ -441,39 +495,81 @@ parse_binop_rhs(int expr_prec, UP_EAST lhs) {
     int binop = CURR_TOK_KIND;
     get_next_tok(); // eat binop
 
-    auto rhs = parse_prima();
+    // unary
+    auto rhs = parse_unary();
     if (!rhs)
       return nullptr;
 
+    // binary
     int next_prec = get_prec_of_tok();
     if (tok_prec < next_prec) {
-      rhs = parse_binop_rhs(tok_prec + 1, std::move(rhs));
+      rhs = parse_binop_rhs(tok_prec + 1, MV(rhs));
       if (!rhs)
         return nullptr;
     }
 
     // merge lhs/rhs
-    lhs = make_unique<Bin_Expr_AST>(binop, std::move(lhs), std::move(rhs));
+    lhs = make_unique<Bin_Expr_AST>(binop, MV(lhs), MV(rhs));
   } // while
 }
 
-// expr ::= primary binop_rhs
+// expr ::= unary binop_rhs
 static UP_EAST
 parse_expr() {
-  auto lhs = parse_prima();
+  auto lhs = parse_unary();
   if (!lhs)
     return nullptr;
-  return parse_binop_rhs(0, std::move(lhs));
+  return parse_binop_rhs(0, MV(lhs));
 }
 
-// prototype ::= id '(' id* ')'
+// prototype
+//   ::= id '(' id* ')'
+//   ::= binary LETTER number? (id, id)
+//   ::= unary LETTER (id)
 static UP_PAST
 parse_proto() {
-  if (CURR_TOK_KIND != TOK_IDENT)
-    return LOG_ERR_P("expected func name in prototype");
+  string fn_name;
 
-  string fn_name = IDENT_STR;
-  get_next_tok(); // eat fn name, expect (
+  unsigned kind = 0; // 0, 1, 2 = ident, unary, binary
+  unsigned bin_prec = 30;
+
+  switch (CURR_TOK_KIND) {
+  default:
+    return LOG_ERR_P("Expected function name in prototype");
+
+  case TOK_IDENT:
+    fn_name = IDENT_STR;
+    kind = 0;
+    get_next_tok(); // eat ident
+    break;
+
+  case TOK_UNARY:
+    get_next_tok();
+    if (!isascii(CURR_TOK_KIND))
+      return LOG_ERR_P("Expected unary operator");
+    fn_name = "unary";
+    fn_name += (char)CURR_TOK_KIND;
+    kind = 1;
+    get_next_tok();
+    break;
+
+  case TOK_BINARY:
+    get_next_tok();
+    if (!isascii(CURR_TOK_KIND))
+      return LOG_ERR_P("Expected binary operator");
+    fn_name = "binary";
+    fn_name += (char)CURR_TOK_KIND;
+    kind = 2;
+    get_next_tok();
+
+    if (CURR_TOK_KIND == TOK_NUM) {
+      if (NUM_VAL < 1 || NUM_VAL > 100)
+        return LOG_ERR_P("Invalid precedence: must be in 1..100");
+      bin_prec = (unsigned)NUM_VAL;
+      get_next_tok();
+    }
+    break;
+  }
 
   if (CURR_TOK_KIND != '(')
     return LOG_ERR_P("Expected '(' in prototype");
@@ -486,7 +582,11 @@ parse_proto() {
     return LOG_ERR_P("Expected ')' in prototype");
 
   get_next_tok(); // eat )
-  return make_unique<Proto_AST>(fn_name, std::move(arg_names));
+
+  if (kind && arg_names.size() != kind)
+    return LOG_ERR_P("Invalid number of the operatnds for te operator");
+
+  return make_unique<Proto_AST>(fn_name, MV(arg_names), kind != 0, bin_prec);
 }
 
 // definition ::= 'def' proto
@@ -498,16 +598,16 @@ parse_def() {
     return nullptr;
 
   if (auto body = parse_expr())
-    return make_unique<Func_AST>(std::move(proto), std::move(body));
+    return make_unique<Func_AST>(MV(proto), MV(body));
   return nullptr;
 }
 
 // top_level_expr ::= expr
 static unique_ptr<Func_AST>
-parse_top_lev_expr() {
+parse_top_level_expr() {
   if (auto body = parse_expr()) {
     auto proto = make_unique<Proto_AST>("__anon_expr", vector<string>());
-    return make_unique<Func_AST>(std::move(proto), std::move(body));
+    return make_unique<Func_AST>(MV(proto), MV(body));
   }
   return nullptr;
 }
@@ -531,30 +631,29 @@ static std::map<string, Value *> NAMED_VALs;
 
 // JIT
 static unique_ptr<orc::KaleidoscopeJIT> JIT;
-static unique_ptr<FunctionPassManager> FPM;
 
-// analisys
+// optimizations, analisys, instruments
+static unique_ptr<FunctionPassManager> FPM;
 static unique_ptr<LoopAnalysisManager> LAM;
 static unique_ptr<FunctionAnalysisManager> FAM;
 static unique_ptr<CGSCCAnalysisManager> CGAM;
 static unique_ptr<ModuleAnalysisManager> MAM;
-
-// instruments
 static unique_ptr<PassInstrumentationCallbacks> PIC;
 static unique_ptr<StandardInstrumentations> SI;
+
 static std::map<string, UP_PAST> FUNC_PROTOs;
 static ExitOnError EXIT_ON_ERR;
 
 Value *
-LOG_ERROR_V(const char *msg) {
+LOG_ERR_V(const char *msg) {
   LOG_ERR(msg);
   return nullptr;
 }
 
 Function *
 GET_FUNC(string name) {
-  if (auto *f = MODULE->getFunction(name))
-    return f;
+  if (auto *fn = MODULE->getFunction(name))
+    return fn;
 
   auto fi = FUNC_PROTOs.find(name);
   if (fi != FUNC_PROTOs.end())
@@ -572,8 +671,22 @@ Value *
 Var_Expr_AST::codegen() {
   Value *v = NAMED_VALs[Name];
   if (!v)
-    return LOG_ERROR_V("Unknown var name");
+    return LOG_ERR_V("Unknown var name");
   return v;
+}
+
+Value *
+Unary_Expr_AST::codegen() {
+  Value *opd_v = Operand->codegen();
+  if (!opd_v)
+    return nullptr;
+
+  auto op_name = string("unary") + Opcode;
+  Function *fn = GET_FUNC(op_name);
+  if (!fn)
+    return LOG_ERR_V("Unknown unary operator");
+
+  return BLD_IR->CreateCall(fn, opd_v, op_name);
 }
 
 Value *
@@ -595,18 +708,25 @@ Bin_Expr_AST::codegen() {
     l = BLD_IR->CreateFCmpULT(l, r, "cmp");
     return BLD_IR->CreateUIToFP(l, Type::getDoubleTy(*CTX), "bool");
   default:
-    return LOG_ERROR_V("invalid binary operator");
-  } // sw
+    break;
+  } // switch
+
+  auto op_name = string("binary") + Op;
+  Function *fn = GET_FUNC(op_name);
+  assert(fn && "binary operator not found!");
+
+  Value *ops[] = {l, r};
+  return BLD_IR->CreateCall(fn, ops, op_name);
 }
 
 Value *
 Call_Expr_AST::codegen() {
   Function *callee_fn = GET_FUNC(Callee);
   if (!callee_fn)
-    return LOG_ERROR_V("Unknown func ref");
+    return LOG_ERR_V("Unknown func ref");
 
   if (callee_fn->arg_size() != Args.size())
-    return LOG_ERROR_V("Incorrect # arguments passed");
+    return LOG_ERR_V("Incorrect # arguments passed");
 
   vector<Value *> args_v;
   for (unsigned i = 0, e = Args.size(); i != e; ++i) {
@@ -674,15 +794,15 @@ For_Expr_AST::codegen() {
 
   // make blocks for the loop header
   auto fn = BLD_IR->GetInsertBlock()->getParent();
-  auto pre_header_bb = BLD_IR->GetInsertBlock();
-  auto loop_bb = BasicBlock::Create(*CTX, "loop", fn);
+  auto pre_header_blk = BLD_IR->GetInsertBlock();
+  auto loop_blk = BasicBlock::Create(*CTX, "loop", fn);
 
   // insert
-  BLD_IR->CreateBr(loop_bb);
-  BLD_IR->SetInsertPoint(loop_bb);
+  BLD_IR->CreateBr(loop_blk);
+  BLD_IR->SetInsertPoint(loop_blk);
 
   auto var = BLD_IR->CreatePHI(Type::getDoubleTy(*CTX), 2, Var_Name);
-  var->addIncoming(start_v, pre_header_bb);
+  var->addIncoming(start_v, pre_header_blk);
 
   // save old
   auto old_val = NAMED_VALs[Var_Name];
@@ -698,9 +818,8 @@ For_Expr_AST::codegen() {
     step_v = Step->codegen();
     if (!step_v)
       return nullptr;
-  } else {
+  } else
     step_v = ConstantFP::get(*CTX, APFloat(1.0));
-  }
 
   auto next_var = BLD_IR->CreateFAdd(var, step_v, "next_var");
 
@@ -714,17 +833,17 @@ For_Expr_AST::codegen() {
       BLD_IR->CreateFCmpONE(end_cond, ConstantFP::get(*CTX, APFloat(0.0)), "loop_cond");
 
   // after loop block
-  auto loop_end_bb = BLD_IR->GetInsertBlock();
-  auto after_bb = BasicBlock::Create(*CTX, "after_loop", fn);
+  auto loop_end_blk = BLD_IR->GetInsertBlock();
+  auto after_blk = BasicBlock::Create(*CTX, "after_loop", fn);
 
   // insert cond branch
-  BLD_IR->CreateCondBr(end_cond, loop_bb, after_bb);
+  BLD_IR->CreateCondBr(end_cond, loop_blk, after_blk);
 
   // after bb
-  BLD_IR->SetInsertPoint(after_bb);
+  BLD_IR->SetInsertPoint(after_blk);
 
   // add new phi
-  var->addIncoming(next_var, loop_end_bb);
+  var->addIncoming(next_var, loop_end_blk);
 
   // restore
   if (old_val)
@@ -737,27 +856,30 @@ For_Expr_AST::codegen() {
 
 Function *
 Proto_AST::codegen() {
-  vector<Type *> doubles(Args.size(), Type::getDoubleTy(*CTX));
-  FunctionType *ft = FunctionType::get(Type::getDoubleTy(*CTX), doubles, false);
-  Function *f = Function::Create(ft, Function::ExternalLinkage, Name, MODULE.get());
+  vector<Type *> params(Args.size(), Type::getDoubleTy(*CTX));
+  FunctionType *f_tp = FunctionType::get(Type::getDoubleTy(*CTX), params, false);
+  Function *fn = Function::Create(f_tp, Function::ExternalLinkage, Name, MODULE.get());
 
   unsigned idx = 0;
-  for (auto &arg : f->args())
+  for (auto &arg : fn->args())
     arg.setName(Args[idx++]);
 
-  return f;
+  return fn;
 }
 
 Function *
 Func_AST::codegen() {
   auto &p = *Proto;
-  FUNC_PROTOs[Proto->getName()] = std::move(Proto);
+  FUNC_PROTOs[Proto->getName()] = MV(Proto);
   Function *fn = GET_FUNC(p.getName());
   if (!fn)
     return nullptr;
 
-  BasicBlock *bb = BasicBlock::Create(*CTX, "entry", fn);
-  BLD_IR->SetInsertPoint(bb);
+  if (p.is_binary_op())
+    BINOP_PREC[p.get_op_name()] = p.get_bin_precedence();
+
+  BasicBlock *blk = BasicBlock::Create(*CTX, "entry", fn);
+  BLD_IR->SetInsertPoint(blk);
 
   NAMED_VALs.clear();
   for (auto &arg : fn->args())
@@ -769,10 +891,14 @@ Func_AST::codegen() {
     verifyFunction(*fn);
 
     FPM->run(*fn, *FAM);
+
     return fn;
   }
 
   fn->eraseFromParent();
+
+  if (p.is_binary_op())
+    BINOP_PREC.erase(p.get_op_name());
   return nullptr;
 }
 
@@ -785,25 +911,22 @@ init_module_and_mgrs() {
 
   // init CTX and Module
   CTX = make_unique<LLVMContext>();
-  MODULE = make_unique<Module>("kaleidoscope jit", *CTX);
+  MODULE = make_unique<Module>("KaleidoscopeJIT", *CTX);
   MODULE->setDataLayout(JIT->getDataLayout());
 
   BLD_IR = make_unique<IRBuilder<>>(*CTX);
 
   // pass manager
 
-  // new pass and analysis managers
+  // optimizations and analysis managers, instruments
   FPM = make_unique<FunctionPassManager>();
-
-  // analisys
   LAM = make_unique<LoopAnalysisManager>();
   FAM = make_unique<FunctionAnalysisManager>();
   CGAM = make_unique<CGSCCAnalysisManager>();
   MAM = make_unique<ModuleAnalysisManager>();
-
-  // instruments
   PIC = make_unique<PassInstrumentationCallbacks>();
   SI = make_unique<StandardInstrumentations>(*CTX, true); // debug logging t/f
+
   SI->registerCallbacks(*PIC, MAM.get());
 
   // transform passes
@@ -821,7 +944,7 @@ init_module_and_mgrs() {
   pb.registerModuleAnalyses(*MAM);
   pb.registerFunctionAnalyses(*FAM);
   pb.crossRegisterProxies(*LAM, *FAM, *CGAM, *MAM);
-};
+}
 
 static void
 handle_def() {
@@ -832,8 +955,7 @@ handle_def() {
       fprintf(stderr, "\n");
 
       // JIT and re-init
-      EXIT_ON_ERR(
-          JIT->addModule(orc::ThreadSafeModule(std::move(MODULE), std::move(CTX))));
+      EXIT_ON_ERR(JIT->addModule(orc::ThreadSafeModule(MV(MODULE), MV(CTX))));
       init_module_and_mgrs();
     }
   } else
@@ -847,8 +969,7 @@ handle_extern() {
       fprintf(stderr, "Read extern:\n\n");
       fn_ir->print(llvm::errs());
       fprintf(stderr, "\n");
-
-      FUNC_PROTOs[proto->getName()] = std::move(proto);
+      FUNC_PROTOs[proto->getName()] = MV(proto);
     }
   } else
     get_next_tok();
@@ -856,11 +977,11 @@ handle_extern() {
 
 static void
 handle_top_level_expr() {
-  if (auto fn_ast = parse_top_lev_expr()) {
+  if (auto fn_ast = parse_top_level_expr()) {
     if (fn_ast->codegen()) {
       auto rt = JIT->getMainJITDylib().createResourceTracker();
-      auto tsm = orc::ThreadSafeModule(std::move(MODULE), std::move(CTX));
-      EXIT_ON_ERR(JIT->addModule(std::move(tsm), rt));
+      auto tsm = orc::ThreadSafeModule(MV(MODULE), MV(CTX));
+      EXIT_ON_ERR(JIT->addModule(MV(tsm), rt));
       init_module_and_mgrs();
 
       auto expr_sym = EXIT_ON_ERR(JIT->lookup("__anon_expr"));
