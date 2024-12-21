@@ -2,8 +2,9 @@ NAME = kal
 CFILE = kal
 CPP = clang++-20
 
-# -stdlib=libc++ : for std::print
-CFLAGS0 = -g3 -pthread -fexperimental-library -std=c++26 # -stdlib=libc++
+# -stdlib=libc++ : for std::print, breaks some shit...
+# -fexperimental-library : ???
+CFLAGS0 = -g3 -pthread -fexperimental-library -std=c++26 
 
 # optimizations use the SIMD/AVX
 CFLAGS1 = -O3 -march=native -mavx2 
@@ -12,9 +13,9 @@ CFLAGS1 = -O3 -march=native -mavx2
 CFLAGS2 = -Wall -Wextra -pedantic -fsanitize=address # -Werror
 
 # llvm 
-CFLAG3 = llvm-config-20 --cxxflags
+CFLAGS3 = `llvm-config-20 --cxxflags`
 
-CFLAGS = $(CFLAGS0) $(CFLAGS1) $(CFLAGS2)
+CFLAGS = $(CFLAGS0) $(CFLAGS1) $(CFLAGS2) $(CFLAGS3)
 
 # -static-libstdc++ : to prevent ASAN: alloc-dealloc-mismatch on exception
 LDLIBS_LLVM = `llvm-config-20 --ldflags --system-libs --libs core orcjit native`

@@ -3,7 +3,6 @@
 
 #include "./KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
-#include "llvm/ExecutionEngine/Orc/Core.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -25,14 +24,15 @@
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
+#include <algorithm>
 #include <cassert>
-#include <cctype>  // is...{space digit alpha alnum ascii}
-#include <cstdio>  // getchar fprintf EOF
-#include <cstdlib> // strtod
-#include <map>     // map
-#include <memory>  // unique_ptr, make_unique
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <memory>
 #include <string>
-#include <utility> // move
+#include <utility>
 #include <vector>
 
 using namespace llvm;
@@ -70,7 +70,10 @@ enum Token {
 
   // operators
   TOK_BINARY = -11,
-  TOK_UNARY = -12
+  TOK_UNARY = -12,
+
+  // var
+  TOK_VAR = -13
 };
 
 static string IDENT_STR; // ← tok_ident
@@ -112,6 +115,8 @@ get_tok() {
       return TOK_BINARY;
     if (IDENT_STR == "unary")
       return TOK_UNARY;
+    if (IDENT_STR == "var")
+      return TOK_VAR;
     return TOK_IDENT;
   }
 
@@ -169,12 +174,17 @@ public:
   Value *codegen() override;
 };
 
-class Var_Expr_AST : public Expr_AST {
+class Variable_Expr_AST : public Expr_AST {
   string Name;
 
 public:
-  Var_Expr_AST(const string &name) : Name(name) {}
+  Variable_Expr_AST(const string &name) : Name(name) {}
   Value *codegen() override;
+
+  const string &
+  get_name() const {
+    return Name;
+  }
 };
 
 class Unary_Expr_AST : public Expr_AST {
@@ -225,7 +235,17 @@ public:
       : Var_Name(var_name), Start(MV(start)), End(MV(end)), Step(MV(step)),
         Body(MV(body)) {}
 
-        Value *codegen() override;
+  Value *codegen() override;
+};
+
+class Var_Expr_AST : public Expr_AST {
+  vector<std::pair<string, UP_EAST>> Var_Names;
+  UP_EAST Body;
+
+public:
+  Var_Expr_AST(vector<std::pair<string, UP_EAST>> names, UP_EAST body)
+      : Var_Names(MV(names)), Body(MV(body)) {}
+  Value *codegen() override;
 };
 
 class Proto_AST {
@@ -284,11 +304,11 @@ public:
 // # PARSER
 // #####################################################################################
 
-static int CURR_TOK_KIND;
+static int CURR_TOK;
 
 static int
 get_next_tok() {
-  return CURR_TOK_KIND = get_tok();
+  return CURR_TOK = get_tok();
 }
 
 // binop precedence
@@ -297,10 +317,10 @@ static std::map<char, int> BINOP_PREC;
 // precedence of the pending binop
 static int
 get_prec_of_tok() {
-  if (!isascii(CURR_TOK_KIND))
+  if (!isascii(CURR_TOK))
     return -1;
 
-  int tok_prec = BINOP_PREC[CURR_TOK_KIND];
+  int tok_prec = BINOP_PREC[CURR_TOK];
   if (tok_prec <= 0)
     return -1;
   return tok_prec;
@@ -336,7 +356,7 @@ parse_paren_expr() {
   if (!v)
     return nullptr;
 
-  if (CURR_TOK_KIND != ')')
+  if (CURR_TOK != ')')
     return LOG_ERR("expected ')'");
   get_next_tok(); // eat )
   return v;
@@ -348,23 +368,23 @@ parse_ident_expr() {
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
-  if (CURR_TOK_KIND != '(') // variable
-    return make_unique<Var_Expr_AST>(ident_name);
+  if (CURR_TOK != '(') // variable
+    return make_unique<Variable_Expr_AST>(ident_name);
 
   // Call
   get_next_tok(); // eat (
   vector<UP_EAST> args;
-  if (CURR_TOK_KIND != ')') {
+  if (CURR_TOK != ')') {
     while (true) {
       if (auto arg = parse_expr())
         args.push_back(MV(arg));
       else
         return nullptr;
 
-      if (CURR_TOK_KIND == ')')
+      if (CURR_TOK == ')')
         break;
 
-      if (CURR_TOK_KIND != ',')
+      if (CURR_TOK != ',')
         return LOG_ERR("Expected ')' or ',' in arg list");
       get_next_tok();
     }
@@ -383,7 +403,7 @@ parse_if_expr() {
   if (!cond)
     return nullptr;
 
-  if (CURR_TOK_KIND != TOK_THEN)
+  if (CURR_TOK != TOK_THEN)
     return LOG_ERR("expected then");
   get_next_tok(); // eat then
 
@@ -391,7 +411,7 @@ parse_if_expr() {
   if (!then)
     return nullptr;
 
-  if (CURR_TOK_KIND != TOK_ELSE)
+  if (CURR_TOK != TOK_ELSE)
     return LOG_ERR("expected else");
   get_next_tok(); // eat else
 
@@ -407,20 +427,20 @@ static UP_EAST
 parse_for_expr() {
   get_next_tok(); // eat 'for'
 
-  if (CURR_TOK_KIND != TOK_IDENT)
+  if (CURR_TOK != TOK_IDENT)
     return LOG_ERR("expected ident after for");
 
   string ident_name = IDENT_STR;
   get_next_tok(); // eat ident
 
-  if (CURR_TOK_KIND != '=')
+  if (CURR_TOK != '=')
     return LOG_ERR("expected '=' after 'for'");
   get_next_tok(); // eat '='
 
   auto start = parse_expr();
   if (!start)
     return nullptr;
-  if (CURR_TOK_KIND != ',')
+  if (CURR_TOK != ',')
     return LOG_ERR("expected ',' after 'for' start value");
   get_next_tok(); // eat ','
 
@@ -430,14 +450,14 @@ parse_for_expr() {
 
   // optional step
   UP_EAST step;
-  if (CURR_TOK_KIND == ',') {
+  if (CURR_TOK == ',') {
     get_next_tok(); // eat ','
     step = parse_expr();
     if (!step)
       return nullptr;
   }
 
-  if (CURR_TOK_KIND != TOK_IN)
+  if (CURR_TOK != TOK_IN)
     return LOG_ERR("expected 'in' after 'for'");
   get_next_tok(); // eat 'in'
 
@@ -448,10 +468,52 @@ parse_for_expr() {
   return make_unique<For_Expr_AST>(ident_name, MV(start), MV(end), MV(step), MV(body));
 }
 
+static UP_EAST
+parse_var_expr() {
+  get_next_tok();
+
+  vector<std::pair<string, UP_EAST>> names;
+
+  if (CURR_TOK != TOK_IDENT)
+    return LOG_ERR("expected indent after var");
+
+  while (true) {
+    string name = IDENT_STR;
+    get_next_tok();
+
+    UP_EAST init;
+    if (CURR_TOK == '=') {
+      get_next_tok();
+      init = parse_expr();
+      if (!init)
+        return nullptr;
+    }
+
+    names.push_back(std::make_pair(name, MV(init)));
+
+    if (CURR_TOK != ',')
+      break;
+    get_next_tok();
+
+    if (CURR_TOK != TOK_IDENT)
+      return LOG_ERR("expected ident list after var");
+  }
+
+  if (CURR_TOK != TOK_IN)
+    return LOG_ERR("expected 'in' kw after 'var'");
+  get_next_tok();
+
+  auto body = parse_expr();
+  if (!body)
+    return nullptr;
+
+  return make_unique<Var_Expr_AST>(MV(names), MV(body));
+}
+
 // primary ::= < ident_expr | num_expr | paren_expr | if_expr | for_expr >
 static UP_EAST
 parse_primary() {
-  switch (CURR_TOK_KIND) {
+  switch (CURR_TOK) {
   default:
     return LOG_ERR("unknown token when expecting an expression");
   case TOK_IDENT:
@@ -464,6 +526,8 @@ parse_primary() {
     return parse_if_expr();
   case TOK_FOR:
     return parse_for_expr();
+  case TOK_VAR:
+    return parse_var_expr();
   }
 }
 
@@ -472,10 +536,10 @@ parse_primary() {
 //   ::= '!' unary
 static UP_EAST
 parse_unary() {
-  if (!isascii(CURR_TOK_KIND) || CURR_TOK_KIND == '(' || CURR_TOK_KIND == ',')
+  if (!isascii(CURR_TOK) || CURR_TOK == '(' || CURR_TOK == ',')
     return parse_primary();
 
-  int opr = CURR_TOK_KIND;
+  int opr = CURR_TOK;
   get_next_tok();
   if (auto opd = parse_unary())
     return make_unique<Unary_Expr_AST>(opr, MV(opd));
@@ -492,7 +556,7 @@ parse_binop_rhs(int expr_prec, UP_EAST lhs) {
     if (tok_prec < expr_prec)
       return lhs; // keep lhs if higher prec
 
-    int binop = CURR_TOK_KIND;
+    int binop = CURR_TOK;
     get_next_tok(); // eat binop
 
     // unary
@@ -533,7 +597,7 @@ parse_proto() {
   unsigned kind = 0; // 0, 1, 2 = ident, unary, binary
   unsigned bin_prec = 30;
 
-  switch (CURR_TOK_KIND) {
+  switch (CURR_TOK) {
   default:
     return LOG_ERR_P("Expected function name in prototype");
 
@@ -545,24 +609,24 @@ parse_proto() {
 
   case TOK_UNARY:
     get_next_tok();
-    if (!isascii(CURR_TOK_KIND))
+    if (!isascii(CURR_TOK))
       return LOG_ERR_P("Expected unary operator");
     fn_name = "unary";
-    fn_name += (char)CURR_TOK_KIND;
+    fn_name += (char)CURR_TOK;
     kind = 1;
     get_next_tok();
     break;
 
   case TOK_BINARY:
     get_next_tok();
-    if (!isascii(CURR_TOK_KIND))
+    if (!isascii(CURR_TOK))
       return LOG_ERR_P("Expected binary operator");
     fn_name = "binary";
-    fn_name += (char)CURR_TOK_KIND;
+    fn_name += (char)CURR_TOK;
     kind = 2;
     get_next_tok();
 
-    if (CURR_TOK_KIND == TOK_NUM) {
+    if (CURR_TOK == TOK_NUM) {
       if (NUM_VAL < 1 || NUM_VAL > 100)
         return LOG_ERR_P("Invalid precedence: must be in 1..100");
       bin_prec = (unsigned)NUM_VAL;
@@ -571,14 +635,14 @@ parse_proto() {
     break;
   }
 
-  if (CURR_TOK_KIND != '(')
+  if (CURR_TOK != '(')
     return LOG_ERR_P("Expected '(' in prototype");
 
   vector<string> arg_names;
   while (get_next_tok() == TOK_IDENT)
     arg_names.push_back(IDENT_STR); // collect func args
 
-  if (CURR_TOK_KIND != ')')
+  if (CURR_TOK != ')')
     return LOG_ERR_P("Expected ')' in prototype");
 
   get_next_tok(); // eat )
@@ -586,7 +650,7 @@ parse_proto() {
   if (kind && arg_names.size() != kind)
     return LOG_ERR_P("Invalid number of the operatnds for te operator");
 
-  return make_unique<Proto_AST>(fn_name, MV(arg_names), kind != 0, bin_prec);
+  return make_unique<Proto_AST>(fn_name, arg_names, kind != 0, bin_prec);
 }
 
 // definition ::= 'def' proto
@@ -627,7 +691,7 @@ parse_extern() {
 static unique_ptr<LLVMContext> CTX;
 static unique_ptr<Module> MODULE;
 static unique_ptr<IRBuilder<>> BLD_IR;
-static std::map<string, Value *> NAMED_VALs;
+static std::map<string, AllocaInst *> NAMED_VALs;
 
 // JIT
 static unique_ptr<orc::KaleidoscopeJIT> JIT;
@@ -662,17 +726,24 @@ GET_FUNC(string name) {
   return nullptr;
 }
 
+static AllocaInst *
+Cretate_Entry_Block_Alloca(Function *fn, const string &var_name) {
+  IRBuilder<> tmp_b(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+  return tmp_b.CreateAlloca(Type::getDoubleTy(*CTX), nullptr, var_name);
+}
+
 Value *
 Num_Expr_AST::codegen() {
   return ConstantFP::get(*CTX, APFloat(Val));
 }
 
 Value *
-Var_Expr_AST::codegen() {
-  Value *v = NAMED_VALs[Name];
+Variable_Expr_AST::codegen() {
+  auto v = NAMED_VALs[Name];
   if (!v)
-    return LOG_ERR_V("Unknown var name");
-  return v;
+    return LOG_ERR_V("Unknown variable name");
+
+  return BLD_IR->CreateLoad(v->getAllocatedType(), v, Name.c_str());
 }
 
 Value *
@@ -691,6 +762,23 @@ Unary_Expr_AST::codegen() {
 
 Value *
 Bin_Expr_AST::codegen() {
+  if (Op == '=') {
+    auto lhse = static_cast<Variable_Expr_AST *>(Lhs.get());
+    if (!lhse)
+      return LOG_ERR_V("destination of '=' must be a variable");
+
+    auto val = Rhs->codegen();
+    if (!val)
+      return nullptr;
+
+    auto var = NAMED_VALs[lhse->get_name()];
+    if (!var)
+      return LOG_ERR_V("Unknown variable name");
+
+    BLD_IR->CreateStore(val, var);
+    return val;
+  }
+
   auto *l = Lhs->codegen();
   auto *r = Rhs->codegen();
 
@@ -712,7 +800,7 @@ Bin_Expr_AST::codegen() {
   } // switch
 
   auto op_name = string("binary") + Op;
-  Function *fn = GET_FUNC(op_name);
+  auto fn = GET_FUNC(op_name);
   assert(fn && "binary operator not found!");
 
   Value *ops[] = {l, r};
@@ -721,7 +809,7 @@ Bin_Expr_AST::codegen() {
 
 Value *
 Call_Expr_AST::codegen() {
-  Function *callee_fn = GET_FUNC(Callee);
+  auto callee_fn = GET_FUNC(Callee);
   if (!callee_fn)
     return LOG_ERR_V("Unknown func ref");
 
@@ -786,54 +874,51 @@ If_Expr_AST::codegen() {
 
 Value *
 For_Expr_AST::codegen() {
+  auto fn = BLD_IR->GetInsertBlock()->getParent();
+  auto alloca = Cretate_Entry_Block_Alloca(fn, Var_Name);
 
   // emit start code
   auto start_v = Start->codegen();
   if (!start_v)
     return nullptr;
 
-  // make blocks for the loop header
-  auto fn = BLD_IR->GetInsertBlock()->getParent();
-  auto pre_header_blk = BLD_IR->GetInsertBlock();
-  auto loop_blk = BasicBlock::Create(*CTX, "loop", fn);
+  BLD_IR->CreateStore(start_v, alloca);
 
-  // insert
+  // make blocks for the loop header
+  auto loop_blk = BasicBlock::Create(*CTX, "loop", fn);
   BLD_IR->CreateBr(loop_blk);
   BLD_IR->SetInsertPoint(loop_blk);
 
-  auto var = BLD_IR->CreatePHI(Type::getDoubleTy(*CTX), 2, Var_Name);
-  var->addIncoming(start_v, pre_header_blk);
-
-  // save old
   auto old_val = NAMED_VALs[Var_Name];
-  NAMED_VALs[Var_Name] = var;
+  NAMED_VALs[Var_Name] = alloca;
 
   // emit body of loop
   if (!Body->codegen())
     return nullptr;
 
   // emit step
-  Value *step_v = nullptr;
+  Value *step_val = nullptr;
   if (Step) {
-    step_v = Step->codegen();
-    if (!step_v)
+    step_val = Step->codegen();
+    if (!step_val)
       return nullptr;
   } else
-    step_v = ConstantFP::get(*CTX, APFloat(1.0));
+    step_val = ConstantFP::get(*CTX, APFloat(1.0));
 
-  auto next_var = BLD_IR->CreateFAdd(var, step_v, "next_var");
-
-  // end condition
   auto end_cond = End->codegen();
   if (!end_cond)
     return nullptr;
 
-  // convert to bool
+  auto curr_var =
+      BLD_IR->CreateLoad(alloca->getAllocatedType(), alloca, Var_Name.c_str());
+  auto next_var = BLD_IR->CreateFAdd(curr_var, step_val, "next_var");
+  BLD_IR->CreateStore(next_var, alloca);
+
+  // end condition
   end_cond =
       BLD_IR->CreateFCmpONE(end_cond, ConstantFP::get(*CTX, APFloat(0.0)), "loop_cond");
 
   // after loop block
-  auto loop_end_blk = BLD_IR->GetInsertBlock();
   auto after_blk = BasicBlock::Create(*CTX, "after_loop", fn);
 
   // insert cond branch
@@ -842,9 +927,6 @@ For_Expr_AST::codegen() {
   // after bb
   BLD_IR->SetInsertPoint(after_blk);
 
-  // add new phi
-  var->addIncoming(next_var, loop_end_blk);
-
   // restore
   if (old_val)
     NAMED_VALs[Var_Name] = old_val;
@@ -852,6 +934,42 @@ For_Expr_AST::codegen() {
     NAMED_VALs.erase(Var_Name);
 
   return Constant::getNullValue(Type::getDoubleTy(*CTX));
+}
+
+Value *
+Var_Expr_AST::codegen() {
+
+  vector<AllocaInst *> old_bindings;
+
+  auto fn = BLD_IR->GetInsertBlock()->getParent();
+
+  for (unsigned i = 0, e = Var_Names.size(); i != e; ++i) {
+    const auto &var_n = Var_Names[i].first;
+    auto init = Var_Names[i].second.get();
+
+    Value *init_ir;
+    if (init) {
+      init_ir = init->codegen();
+      if (!init_ir)
+        return nullptr;
+    } else
+      init_ir = ConstantFP::get(*CTX, APFloat(0.0));
+
+    auto alloca = Cretate_Entry_Block_Alloca(fn, var_n);
+    BLD_IR->CreateStore(init_ir, alloca);
+
+    old_bindings.push_back(NAMED_VALs[var_n]);
+    NAMED_VALs[var_n] = alloca;
+  }
+
+  auto body_ir = Body->codegen();
+  if (!body_ir)
+    return nullptr;
+
+  for (unsigned i = 0, e = Var_Names.size(); i != e; ++i)
+    NAMED_VALs[Var_Names[i].first] = old_bindings[i];
+
+  return body_ir;
 }
 
 Function *
@@ -871,7 +989,7 @@ Function *
 Func_AST::codegen() {
   auto &p = *Proto;
   FUNC_PROTOs[Proto->getName()] = MV(Proto);
-  Function *fn = GET_FUNC(p.getName());
+  auto fn = GET_FUNC(p.getName());
   if (!fn)
     return nullptr;
 
@@ -882,8 +1000,11 @@ Func_AST::codegen() {
   BLD_IR->SetInsertPoint(blk);
 
   NAMED_VALs.clear();
-  for (auto &arg : fn->args())
-    NAMED_VALs[string(arg.getName())] = &arg;
+  for (auto &arg : fn->args()) {
+    auto alloca = Cretate_Entry_Block_Alloca(fn, string(arg.getName()));
+    BLD_IR->CreateStore(&arg, alloca);
+    NAMED_VALs[string(arg.getName())] = alloca;
+  }
 
   if (Value *ret = Body->codegen()) {
     BLD_IR->CreateRet(ret);
@@ -1003,7 +1124,7 @@ LOOP() {
   while (true) {
     fprintf(stderr, "ready> ");
 
-    switch (CURR_TOK_KIND) {
+    switch (CURR_TOK) {
     case TOK_EOF:
       return;
     case ';':
@@ -1060,6 +1181,7 @@ main() {
   InitializeNativeTargetAsmParser();
 
   // setup binops, 1 is lowest
+  BINOP_PREC['='] = 2;
   BINOP_PREC['<'] = 10;
   BINOP_PREC['+'] = 20;
   BINOP_PREC['-'] = 20;
